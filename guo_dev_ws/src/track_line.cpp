@@ -112,6 +112,33 @@ const double BLUE_AREA_VALID = 2000.0; // 有效面积阈值
 // 蓝色挡板移开检测参数
 const double BLUE_REMOVE_AREA_MIN = 100.0; // 移开检测的最小面积阈值（过滤小噪点）
 
+//---------------斑马线检测参数（可调节）------------------------------------------
+// HSV白色范围
+const int BANMA_WHITE_H_MIN = 0;    // 色调H最小值
+const int BANMA_WHITE_H_MAX = 180;  // 色调H最大值
+const int BANMA_WHITE_S_MIN = 0;    // 饱和度S最小值
+const int BANMA_WHITE_S_MAX = 30;   // 饱和度S最大值
+const int BANMA_WHITE_V_MIN = 200;  // 亮度V最小值（高亮度白色）
+const int BANMA_WHITE_V_MAX = 255;  // 亮度V最大值
+
+// 斑马线检测ROI区域
+const int BANMA_ROI_X = 2;           // ROI左上角X坐标
+const int BANMA_ROI_Y = 110;         // ROI左上角Y坐标
+const int BANMA_ROI_WIDTH = 318;     // ROI宽度
+const int BANMA_ROI_HEIGHT = 200;    // ROI高度
+
+// 斑马线矩形筛选尺寸（斑马线由多个白色矩形组成）
+const int BANMA_RECT_MIN_WIDTH = 10;   // 矩形最小宽度
+const int BANMA_RECT_MAX_WIDTH = 50;   // 矩形最大宽度
+const int BANMA_RECT_MIN_HEIGHT = 10;  // 矩形最小高度
+const int BANMA_RECT_MAX_HEIGHT = 50;  // 矩形最大高度
+
+// 斑马线判定阈值
+const int BANMA_MIN_COUNT = 4;  // 判定为斑马线需要的最少白色矩形数量
+
+// 形态学处理参数
+const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
+
 //---------------性能优化选项-------------------------------------------------
 // 如果树莓派性能不足，可以设置为1以使用更快的处理方式（可能会略微降低效果）
 const int FAST_MODE = 0; // 0=正常模式（质量优先），1=快速模式（速度优先）
@@ -255,9 +282,10 @@ cv::Mat ImageSobel(cv::Mat &frame)
     Mat gradientMagnitude = abs(sobelY);
     convertScaleAbs(gradientMagnitude, gradientMagnitude);
 
-    // 使用自适应阈值，提高阈值以减少噪声
-    double threshold_value = 0;
-    cv::threshold(gradientMagnitude, binaryImage, threshold_value, 255, cv::THRESH_BINARY + cv::THRESH_OTSU);
+    // 使用固定阈值替代OTSU，保留更多稀疏边缘（OTSU阈值过高会丢失弱边缘）
+    double threshold_value = 40;  // 固定阈值40，可根据实际效果调整（范围：20-60）
+    cv::threshold(gradientMagnitude, binaryImage, threshold_value, 255, cv::THRESH_BINARY);
+    // 原OTSU方法（注释掉）：threshold(gradientMagnitude, binaryImage, 0, 255, THRESH_BINARY + THRESH_OTSU);
     
     // 【性能优化】先裁剪ROI，只在ROI区域进行形态学操作，大幅提升速度
     // ROI区域只有 318x46 像素，比全图 320x240 小很多
@@ -267,22 +295,26 @@ cv::Mat ImageSobel(cv::Mat &frame)
     
     // 在ROI区域进行形态学操作（处理面积从76800像素降到14628像素，速度提升约5倍）
     if (FAST_MODE == 0) {
-        // 正常模式：先进行闭运算，连接断开的线条（对模糊线条很重要）
-        Mat kernel_close = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 3)); // 横向连接
+        // 正常模式：先进行闭运算，连接断开的线条（对稀疏线条很重要）
+        // 增大kernel以更好连接稀疏线条：横向从5增加到9，纵向从3增加到5
+        Mat kernel_close = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(9, 5)); // 横向连接
         cv::morphologyEx(croppedImage, croppedImage, cv::MORPH_CLOSE, kernel_close);
         
-        // 再进行膨胀操作
-        Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+        // 再进行膨胀操作，增大kernel以弥补稀疏区域
+        Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
         cv::dilate(croppedImage, croppedImage, kernel, cv::Point(-1, -1), 1);
     } else {
-        // 快速模式：跳过闭运算，只做一次较小的膨胀（速度更快，但可能对模糊线条效果略差）
-        Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 2)); // 更小的kernel
+        // 快速模式：使用较大的闭运算连接稀疏线条
+        Mat kernel_close = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 3));
+        cv::morphologyEx(croppedImage, croppedImage, cv::MORPH_CLOSE, kernel_close);
+        
+        Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
         cv::dilate(croppedImage, croppedImage, kernel, cv::Point(-1, -1), 1);
     }
 
-    // 使用概率霍夫变换检测直线，提高阈值以减少噪声
+    // 使用概率霍夫变换检测直线，降低阈值以捕获更多稀疏线段
     vector<Vec4i> lines;
-    HoughLinesP(croppedImage, lines, 1, CV_PI / 180, 30, 20, 15); // 提高阈值：25->30, 15->20, 10->15
+    HoughLinesP(croppedImage, lines, 1, CV_PI / 180, 20, 15, 8); // 降低阈值：30->20, 20->15, 15->8
 
     // 遍历直线并筛选有效线段
     for (const auto &l : lines) 
@@ -291,8 +323,8 @@ cv::Mat ImageSobel(cv::Mat &frame)
         double angle = atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
         double length = hypot(l[3] - l[1], l[2] - l[0]);
 
-        // 筛选条件：角度范围、最小长度（提高最小长度要求）
-        if (abs(angle) > 15 && length > 12) // 增加最小长度限制
+        // 筛选条件：角度范围、最小长度（降低最小长度要求以捕获更多短线段）
+        if (abs(angle) > 15 && length > 8) // 降低最小长度：12->8
         {
             // 调整坐标以适应全图
             Vec4i adjustedLine = l;
@@ -301,9 +333,9 @@ cv::Mat ImageSobel(cv::Mat &frame)
             adjustedLine[2] += x_roi;
             adjustedLine[3] += y_roi;
 
-            // 绘制白线
+            // 绘制白线，增加线宽以填充间隙
             line(binaryImage_1, Point(adjustedLine[0], adjustedLine[1]),
-                Point(adjustedLine[2], adjustedLine[3]), Scalar(255), 2, LINE_AA);
+                Point(adjustedLine[2], adjustedLine[3]), Scalar(255), 3, LINE_AA); // 线宽从2增加到3
         }
     }
 
@@ -524,24 +556,26 @@ int banma_get(cv::Mat &frame) {
     cv::Mat hsv;
     cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
 
-    // 定义白色的下界和上界
-    cv::Scalar lower_white(0, 0, 200);
-    cv::Scalar upper_white(180, 30, 255);
+    // 定义白色的下界和上界（使用常量）
+    cv::Scalar lower_white(BANMA_WHITE_H_MIN, BANMA_WHITE_S_MIN, BANMA_WHITE_V_MIN);
+    cv::Scalar upper_white(BANMA_WHITE_H_MAX, BANMA_WHITE_S_MAX, BANMA_WHITE_V_MAX);
 
     // 创建白色掩码
     cv::Mat mask1;
     cv::inRange(hsv, lower_white, upper_white, mask1);
 
-    // 创建一个3x3的矩形结构元素
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    // 创建形态学处理的结构元素（使用常量）
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, 
+                                               cv::Size(BANMA_MORPH_KERNEL_SIZE, BANMA_MORPH_KERNEL_SIZE));
     // 对掩码进行膨胀和腐蚀操作
     cv::dilate(mask1, mask1, kernel);
     cv::erode(mask1, mask1, kernel);
 
-    // 裁剪ROI区域
-    cv::Rect roi(2, 110, std::min(318 - 2, mask1.cols - 2), std::min(200, mask1.rows - 110));
+    // 裁剪ROI区域（使用常量，并确保不超出图像边界）
+    cv::Rect roi(BANMA_ROI_X, BANMA_ROI_Y, 
+                 std::min(BANMA_ROI_WIDTH, mask1.cols - BANMA_ROI_X), 
+                 std::min(BANMA_ROI_HEIGHT, mask1.rows - BANMA_ROI_Y));
     cv::Mat src = mask1(roi);
-    // cv::imshow("src", src);  // 显示ROI区域
 
     // 查找图像中的轮廓
     std::vector<std::vector<cv::Point>> contours;
@@ -551,23 +585,23 @@ int banma_get(cv::Mat &frame) {
     cv::Mat contour_img = src.clone();
 
     int count_BMX = 0;  // 斑马线计数器
-    int min_w = 10;  // 最小宽度
-    int max_w = 50;  // 最大宽度
-    int min_h = 10;  // 最小高度
-    int max_h = 50;  // 最大高度
 
     // 遍历每个找到的轮廓
     for (const auto& contour : contours) {
         cv::Rect rect = cv::boundingRect(contour);  // 获取当前轮廓的外接矩形 rect
-        if (min_h <= rect.height && rect.height < max_h && min_w <= rect.width && rect.width < max_w) {
+        
+        // 筛选符合尺寸的矩形（使用常量）
+        if (BANMA_RECT_MIN_HEIGHT <= rect.height && rect.height < BANMA_RECT_MAX_HEIGHT && 
+            BANMA_RECT_MIN_WIDTH <= rect.width && rect.width < BANMA_RECT_MAX_WIDTH) {
             // 过滤赛道外的轮廓
             cv::rectangle(contour_img, rect, cv::Scalar(255), 2);
             count_BMX++;
         }
     }
-    // 最终返回值
-    if (count_BMX >= 4) {
-        cout << "检测到斑马线" << endl;
+    
+    // 最终返回值（使用常量）
+    if (count_BMX >= BANMA_MIN_COUNT) {
+        cout << "检测到斑马线（白色矩形数量：" << count_BMX << "）" << endl;
         return 1;
     }
     else {

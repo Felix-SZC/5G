@@ -50,3 +50,9 @@ target_link_libraries(track_line
     ${OpenCV_LIBS}  
     ${CMAKE_THREAD_LIBS_INIT}
 )
+
+add_executable(test_sobel test/test_sobel.cpp)
+
+target_link_libraries(test_sobel
+    ${OpenCV_LIBS}
+)
