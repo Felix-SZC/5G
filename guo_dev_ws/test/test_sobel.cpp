@@ -43,22 +43,21 @@ int main(int argc, char** argv) {
     waitKey(0);
     
     Rect roiRect(1, 109, 318, 46);
-    Mat roiFrame = resizedFrame(roiRect).clone();
-    imshow("2. ROI", roiFrame);
+    imshow("2. ROI", resizedFrame(roiRect));
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
-    // 灰度图
+    // 灰度图（整帧）
     Mat grayImage;
-    cvtColor(roiFrame, grayImage, COLOR_BGR2GRAY);
-    imshow("3. Gray", grayImage);
+    cvtColor(resizedFrame, grayImage, COLOR_BGR2GRAY);
+    imshow("3. Gray Full Frame", grayImage);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
     // 均值滤波
     Mat blurredImage;
     blur(grayImage, blurredImage, Size(5, 5));
-    imshow("4. Blurred", blurredImage);
+    imshow("4. Blurred Full Frame", blurredImage);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
@@ -67,15 +66,15 @@ int main(int argc, char** argv) {
     Sobel(blurredImage, sobelX, CV_64F, 1, 0, 3); // x方向梯度
     Sobel(blurredImage, sobelY, CV_64F, 0, 1, 3); // y方向梯度
     Mat gradientMagnitude = cv::abs(sobelY) + 0.5 * cv::abs(sobelX); // x方向权重减半
-    Mat gradientMagnitude_8u;
-    convertScaleAbs(gradientMagnitude, gradientMagnitude_8u);
-    imshow("5. Sobel Gradient", gradientMagnitude_8u);
+    Mat gradientMagnitude8u;
+    convertScaleAbs(gradientMagnitude, gradientMagnitude8u);
+    imshow("5. Sobel Gradient Full Frame", gradientMagnitude8u);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
     // 颜色空间转换 + 自适应阈值，增强不同场景下的白色跑道线
     Mat hsvImage;
-    cvtColor(roiFrame, hsvImage, COLOR_BGR2HSV);
+    cvtColor(resizedFrame, hsvImage, COLOR_BGR2HSV);
     vector<Mat> hsvChannels;
     split(hsvImage, hsvChannels); // H, S, V
 
@@ -83,7 +82,7 @@ int main(int argc, char** argv) {
     Ptr<CLAHE> clahe = createCLAHE(2.0, Size(4, 4));
     clahe->apply(hsvChannels[2], claheOutput);
     GaussianBlur(claheOutput, claheOutput, Size(5, 5), 0);
-    imshow("6. CLAHE V Channel", claheOutput);
+    imshow("6. CLAHE V Channel Full Frame", claheOutput);
     cout << "按任意键继续..." << endl;
     waitKey(0);  
 
@@ -91,27 +90,35 @@ int main(int argc, char** argv) {
     adaptiveThreshold(claheOutput, adaptiveMask, 255,
                         ADAPTIVE_THRESH_MEAN_C, THRESH_BINARY,
                       31, -10);
-    imshow("7. Adaptive Mask", adaptiveMask);
+    imshow("7. Adaptive Mask Full Frame", adaptiveMask);
     cout << "按任意键继续..." << endl;
     waitKey(0);
 
-    Mat binaryImage = adaptiveMask.clone();
+    Mat gradientMask;
+    threshold(gradientMagnitude8u, gradientMask, 30, 255, THRESH_BINARY);
+    Mat gradientKernel = getStructuringElement(MORPH_RECT, Size(3, 3));
+    dilate(gradientMask, gradientMask, gradientKernel);
+    imshow("8. Gradient Mask Full Frame", gradientMask);
+    cout << "按任意键继续..." << endl;
+    waitKey(0);
 
-    medianBlur(binaryImage, binaryImage, 3);
+    Mat binaryMask;
+    bitwise_and(adaptiveMask, gradientMask, binaryMask);
+    medianBlur(binaryMask, binaryMask, 3);
 
-    Mat noiseKernel = getStructuringElement(MORPH_RECT, Size(3, 3));
-    morphologyEx(binaryImage, binaryImage, MORPH_OPEN, noiseKernel);
+    Mat noiseKernel = getStructuringElement(MORPH_RECT, Size(1, 1));
+    morphologyEx(binaryMask, binaryMask, MORPH_OPEN, noiseKernel);
 
-    imshow("8. Binary", binaryImage);
+    imshow("9. Binary Mask Full Frame", binaryMask);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
     // 形态学操作
-    Mat morphImage = binaryImage.clone();
-    Mat kernel_close = getStructuringElement(MORPH_RECT, Size(9, 5));
-    morphologyEx(morphImage, morphImage, MORPH_CLOSE, kernel_close);
-    Mat kernel = getStructuringElement(MORPH_RECT, Size(5, 5));
-    dilate(morphImage, morphImage, kernel, Point(-1, -1), 1);
+    Mat morphImage = binaryMask.clone();
+    Mat kernelClose = getStructuringElement(MORPH_RECT, Size(9, 5));
+    morphologyEx(morphImage, morphImage, MORPH_CLOSE, kernelClose);
+    Mat kernelDilate = getStructuringElement(MORPH_RECT, Size(5, 5));
+    dilate(morphImage, morphImage, kernelDilate, Point(-1, -1), 1);
 
     Mat labels, stats, centroids;
     int numLabels = connectedComponentsWithStats(morphImage, labels, stats, centroids, 8, CV_32S);
@@ -123,43 +130,44 @@ int main(int argc, char** argv) {
     }
     morphImage = filteredMorph;
 
-    imshow("9. Morphed", morphImage);
+    imshow("10. Morphed Full Frame", morphImage);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
     // Hough直线检测
     vector<Vec4i> lines;
-    HoughLinesP(morphImage, lines, 1, CV_PI / 180, 20, 15, 8);
+    Mat morphRoi = morphImage(roiRect).clone();
+    HoughLinesP(morphRoi, lines, 1, CV_PI / 180, 20, 15, 8);
     cout << "检测到 " << lines.size() << " 条直线" << endl;
-    
+
     // 在原图上绘制结果
     Mat houghResult = resizedFrame.clone();
     rectangle(houghResult, Rect(1, 109, 318, 46), Scalar(0, 255, 0), 1);
-    
+
     Mat finalImage = Mat::zeros(240, 320, CV_8U);
-    
+
     for (const auto &l : lines) {
         double angle = atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
         double length = hypot(l[3] - l[1], l[2] - l[0]);
-        
+
         if (abs(angle) > 15 && length > 8) {
             Vec4i adjustedLine = l;
             adjustedLine[0] += roiRect.x; adjustedLine[1] += roiRect.y;
             adjustedLine[2] += roiRect.x; adjustedLine[3] += roiRect.y;
-            
+
             line(finalImage, Point(adjustedLine[0], adjustedLine[1]),
                  Point(adjustedLine[2], adjustedLine[3]), Scalar(255), 3, LINE_AA);
-            
+
             line(houghResult, Point(adjustedLine[0], adjustedLine[1]),
                  Point(adjustedLine[2], adjustedLine[3]), Scalar(0, 0, 255), 2, LINE_AA);
         }
     }
-    
-    imshow("10. Hough Lines", houghResult);
+
+    imshow("11. Hough Lines", houghResult);
     cout << "按任意键继续..." << endl;
     waitKey(0);
-    
-    imshow("11. Final Result", finalImage);
+
+    imshow("12. Final Result", finalImage);
     cout << "按ESC退出" << endl;
     waitKey(0);
     

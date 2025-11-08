@@ -134,14 +134,13 @@ const int BANMA_RECT_MIN_HEIGHT = 10;  // 矩形最小高度
 const int BANMA_RECT_MAX_HEIGHT = 50;  // 矩形最大高度
 
 // 斑马线判定阈值
-const int BANMA_MIN_COUNT = 4;  // 判定为斑马线需要的最少白色矩形数量
+const int BANMA_MIN_COUNT = 6;  // 判定为斑马线需要的最少白色矩形数量
 
 // 形态学处理参数
 const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
 
 //---------------性能优化选项-------------------------------------------------
 // 如果树莓派性能不足，可以设置为1以使用更快的处理方式（可能会略微降低效果）
-const int FAST_MODE = 0; // 0=正常模式（质量优先），1=快速模式（速度优先）
 const int MIN_COMPONENT_AREA = 400;
 
 // 定义舵机和电机PWM初始化函数
@@ -255,51 +254,56 @@ cv::Mat ImageSobel(cv::Mat &frame)
 {
     const cv::Size targetSize(320, 240);
     cv::Mat resizedFrame;
-    if (frame.size() != targetSize) {
+    if (frame.size() != targetSize)
+    {
         cv::resize(frame, resizedFrame, targetSize);
-    } else {
+    }
+    else
+    {
         resizedFrame = frame.clone();
     }
 
-    const cv::Rect roiRect(1, 109, 318, 46);             // 巡线ROI区域
-    cv::Mat roiFrame = resizedFrame(roiRect).clone();    // 提取ROI做后续处理
+    const cv::Rect roiRect(1, 109, 318, 46); // 巡线ROI区域
 
     cv::Mat grayImage;
-    cv::cvtColor(roiFrame, grayImage, cv::COLOR_BGR2GRAY); // ROI灰度化
+    cv::cvtColor(resizedFrame, grayImage, cv::COLOR_BGR2GRAY); // 整帧灰度化
 
-    int kernelSize = (FAST_MODE == 0) ? 5 : 3;
-    cv::blur(grayImage, grayImage, cv::Size(kernelSize, kernelSize)); // 均值滤波降噪
+    int kernelSize = 5;
+    cv::Mat blurredImage;
+    cv::blur(grayImage, blurredImage, cv::Size(kernelSize, kernelSize)); // 整帧均值滤波降噪
 
     cv::Mat sobelX, sobelY;
-    cv::Sobel(grayImage, sobelX, CV_64F, 1, 0, 3);        // X方向梯度
-    cv::Sobel(grayImage, sobelY, CV_64F, 0, 1, 3);        // Y方向梯度
-    cv::Mat gradientMagnitude = cv::abs(sobelY) + 0.5 * cv::abs(sobelX); //Y主导的综合梯度
+    cv::Sobel(blurredImage, sobelX, CV_64F, 1, 0, 3); // X方向梯度
+    cv::Sobel(blurredImage, sobelY, CV_64F, 0, 1, 3); // Y方向梯度
+    cv::Mat gradientMagnitude = cv::abs(sobelY) + 0.5 * cv::abs(sobelX); // 组合梯度更偏向纵向
     cv::Mat gradientMagnitude8U;
-    cv::convertScaleAbs(gradientMagnitude, gradientMagnitude8U); // 转回8位方便阈值处理
+    cv::convertScaleAbs(gradientMagnitude, gradientMagnitude8U); // 转为8位方便阈值
 
     cv::Mat hsvImage;
-    cv::cvtColor(roiFrame, hsvImage, cv::COLOR_BGR2HSV); // HSV分离亮度信息
+    cv::cvtColor(resizedFrame, hsvImage, cv::COLOR_BGR2HSV); // 整帧HSV分离亮度信息
     std::vector<cv::Mat> hsvChannels;
-    cv::split(hsvImage, hsvChannels);                    // 拆分H/S/V
+    cv::split(hsvImage, hsvChannels); // 拆分H/S/V
 
     cv::Mat claheOutput;
     cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(4, 4)); // 自适应直方图均衡
-    clahe->apply(hsvChannels[2], claheOutput);                        // 仅处理V通道
-    cv::GaussianBlur(claheOutput, claheOutput, cv::Size(5, 5), 0);    // 平滑提升稳定性
+    clahe->apply(hsvChannels[2], claheOutput);                       // 仅对V通道增强
+    cv::GaussianBlur(claheOutput, claheOutput, cv::Size(5, 5), 0);   // 平滑提升稳定性
 
     cv::Mat adaptiveMask;
     cv::adaptiveThreshold(claheOutput, adaptiveMask, 255,
                           cv::ADAPTIVE_THRESH_MEAN_C, cv::THRESH_BINARY,
-                          31, -10);                                   // 自适应阈值提取亮线
+                          31, -10); // 自适应阈值提取亮线
 
     cv::Mat gradientMask;
-    cv::threshold(gradientMagnitude8U, gradientMask, 40, 255, cv::THRESH_BINARY); // 梯度二值掩码
+    cv::threshold(gradientMagnitude8U, gradientMask, 30, 255, cv::THRESH_BINARY); // 梯度二值掩码
+    cv::Mat gradientKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    cv::dilate(gradientMask, gradientMask, gradientKernel);
 
     cv::Mat binaryMask;
-    cv::bitwise_and(adaptiveMask, gradientMask, binaryMask);          // 亮度+梯度联合约束
+    cv::bitwise_and(adaptiveMask, gradientMask, binaryMask); // 亮度+梯度联合约束
 
-    cv::medianBlur(binaryMask, binaryMask, 3);                        // 中值去椒盐噪声
-    cv::Mat noiseKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    cv::medianBlur(binaryMask, binaryMask, 3); // 中值去椒盐噪声
+    cv::Mat noiseKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 1));
     cv::morphologyEx(binaryMask, binaryMask, cv::MORPH_OPEN, noiseKernel); // 小结构开运算
 
     cv::Mat morphImage = binaryMask.clone();
@@ -311,22 +315,27 @@ cv::Mat ImageSobel(cv::Mat &frame)
     cv::Mat labels, stats, centroids;
     int numLabels = cv::connectedComponentsWithStats(morphImage, labels, stats, centroids, 8, CV_32S); // 连通域分析
     cv::Mat filteredMorph = cv::Mat::zeros(morphImage.size(), CV_8U);
-    for (int i = 1; i < numLabels; ++i) {
-        if (stats.at<int>(i, cv::CC_STAT_AREA) >= MIN_COMPONENT_AREA) {
+    for (int i = 1; i < numLabels; ++i)
+    {
+        if (stats.at<int>(i, cv::CC_STAT_AREA) >= MIN_COMPONENT_AREA)
+        {
             filteredMorph.setTo(255, labels == i);
         }
     }
     morphImage = filteredMorph;
 
     std::vector<cv::Vec4i> lines;
-    cv::HoughLinesP(morphImage, lines, 1, CV_PI / 180, 20, 15, 8);
+    cv::Mat morphRoi = morphImage(roiRect).clone();
+    cv::HoughLinesP(morphRoi, lines, 1, CV_PI / 180, 20, 15, 8);
 
     cv::Mat finalImage = cv::Mat::zeros(targetSize, CV_8U);
-    for (const auto &l : lines) {
+    for (const auto &l : lines)
+    {
         double angle = std::atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
         double length = std::hypot(l[3] - l[1], l[2] - l[0]);
 
-        if (std::abs(angle) > 15 && length > 8) {
+        if (std::abs(angle) > 15 && length > 8)
+        {
             cv::Vec4i adjustedLine = l;
             adjustedLine[0] += roiRect.x;
             adjustedLine[1] += roiRect.y;
@@ -827,6 +836,8 @@ int main(void)
 
         frame = undistort(frame); // 对帧进行去畸变处理
 
+        auto start = std::chrono::high_resolution_clock::now();
+
         // 处理发车逻辑
         if (fache_sign == 0) // 如果开始标志为0
         {
@@ -862,6 +873,10 @@ int main(void)
         }
 
         motor_servo_contral(); // 控制舵机电机
+
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = end - start;
+        std::cout << "Time per frame: " << elapsed.count() << " s    FPS: " << (elapsed.count() > 0 ? 1.0 / elapsed.count() : 0.0) << "    number: " << number << std::endl;
 
     }
 }
