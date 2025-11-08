@@ -142,6 +142,7 @@ const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
 //---------------性能优化选项-------------------------------------------------
 // 如果树莓派性能不足，可以设置为1以使用更快的处理方式（可能会略微降低效果）
 const int MIN_COMPONENT_AREA = 400;
+const bool SHOW_SOBEL_DEBUG = false;
 
 // 定义舵机和电机PWM初始化函数
 void servo_motor_pwmInit(void) 
@@ -250,7 +251,7 @@ cv::Mat drawWhiteLine(cv::Mat binaryImage, cv::Point start, cv::Point end, int l
     return resultImage; // 返回绘制了白线的图像
 }
 
-cv::Mat ImageSobel(cv::Mat &frame) 
+cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr) 
 {
     const cv::Size targetSize(320, 240);
     cv::Mat resizedFrame;
@@ -329,6 +330,13 @@ cv::Mat ImageSobel(cv::Mat &frame)
     cv::HoughLinesP(morphRoi, lines, 1, CV_PI / 180, 20, 15, 8);
 
     cv::Mat finalImage = cv::Mat::zeros(targetSize, CV_8U);
+    cv::Mat overlayImage;
+    if (debugOverlay)
+    {
+        overlayImage = resizedFrame.clone();
+        cv::rectangle(overlayImage, roiRect, cv::Scalar(0, 255, 0), 1);
+    }
+
     for (const auto &l : lines)
     {
         double angle = std::atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
@@ -346,7 +354,19 @@ cv::Mat ImageSobel(cv::Mat &frame)
                      cv::Point(adjustedLine[0], adjustedLine[1]),
                      cv::Point(adjustedLine[2], adjustedLine[3]),
                      cv::Scalar(255), 3, cv::LINE_AA);
+            if (debugOverlay)
+            {
+                cv::line(overlayImage,
+                         cv::Point(adjustedLine[0], adjustedLine[1]),
+                         cv::Point(adjustedLine[2], adjustedLine[3]),
+                         cv::Scalar(0, 0, 255), 2, cv::LINE_AA);
+            }
         }
+    }
+
+    if (debugOverlay)
+    {
+        *debugOverlay = overlayImage;
     }
 
     return finalImage;
@@ -859,9 +879,13 @@ int main(void)
 
             if ( banma == 0 ){
 
-                bin_image = ImageSobel(frame); // 图像预处理
-                //imshow("预处理后的图像", bin_image); // 显示预处理后的图像
-                //waitKey(1); // 更新显示窗口
+                cv::Mat debugOverlay;
+                bin_image = ImageSobel(frame, SHOW_SOBEL_DEBUG ? &debugOverlay : nullptr); // 图像预处理
+                if (SHOW_SOBEL_DEBUG && !debugOverlay.empty())
+                {
+                    cv::imshow("TrackLine Overlay", debugOverlay);
+                    cv::waitKey(1);
+                }
                 Tracking(bin_image); // 进行巡线识别
 
                 if(number > 600){
