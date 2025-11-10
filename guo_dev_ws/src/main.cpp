@@ -75,7 +75,6 @@ int changeroad = 1; // 变道检测结果
 int bz_heighest = 0; // 避障高度
 int bz_xcenter = 0; // 存储避障中心点
 int bz_get = 0;
-int bz_bottom = 320; // 存储避障底部点
 std::vector<cv::Point> mid_bz; // 存储中线
 std::vector<cv::Point> left_line_bz; // 存储左线条
 std::vector<cv::Point> right_line_bz; // 存储右线条
@@ -87,14 +86,11 @@ int last_known_bz_heighest = 0;
 int count_bz = 0; // 避障计数器
 int bz_disappear_count = 0; // 障碍物连续消失计数器
 const int BZ_DISAPPEAR_THRESHOLD = 5; // 确认障碍物消失的帧数阈值
+int bz_y2 = 170; // 可见障碍物底部阈值
 
 //----------------停车相关---------------------------------------------------
 int park_mid = 160; // 停车车库中线检测结果
 int flag_gohead = 0; // 前进标志
-int park_find = 0; // 停车检测结果
-int flag_park_find = 0; // 停车标志
-int parkchose = 0; // 停车车库检测结果
-int flag_parkchose = 0; // 停车车库标志
 int flag_turn_done = 0; // 转向完成标志
 std::chrono::steady_clock::time_point zebra_stop_start_time;
 bool is_stopping_at_zebra = false;
@@ -189,16 +185,12 @@ const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
 const int MIN_COMPONENT_AREA = 400;
 const bool SHOW_SOBEL_DEBUG = true;
 const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，减轻imshow开销
+//---------------性能统计---------------------------------------------------
+int number = 0; // 已处理帧计数
 
 //--------------------------------------------------------------------------
 
-int number = 0;
-int numbera = 0;
-int numberb = 0;
-
-int bz_y2 = 170;
-
-// 定义舵机和电机PWM初始化函数
+// 功能: 初始化舵机、电机与云台PWM，完成GPIO库初始化
 void servo_motor_pwmInit(void) 
 {
     if (gpioInitialise() < 0) // 初始化GPIO，如果失败则返回
@@ -232,6 +224,7 @@ void servo_motor_pwmInit(void)
 }
 
 //------------------------------------------------------------------------------------------------------------
+// 功能: 对输入图像进行畸变校正，返回去畸变后的图像
 cv::Mat undistort(const cv::Mat &frame) 
 {
     static cv::Mat mapx, mapy; // 映射矩阵
@@ -266,16 +259,9 @@ cv::Mat undistort(const cv::Mat &frame)
     return undistortedFrame; // 返回去畸变后的图像
 }
 
-// 定义自定义直方图均衡化函数，输入为图像和alpha值   在ImagePreprocessing函数中调用
-Mat customEqualizeHist(const Mat &inputImage, float alpha) 
-{
-    Mat enhancedImage; // 定义增强后的图像
-    equalizeHist(inputImage, enhancedImage); // 对输入图像进行直方图均衡化
+ 
 
-    // 减弱对比度增强的效果
-    return alpha * enhancedImage + (1 - alpha) * inputImage; // 返回调整后的图像
-}
-
+// 功能: 在二值图像上从起点到终点绘制指定宽度的白线（用于补线）
 cv::Mat drawWhiteLine(cv::Mat binaryImage, cv::Point start, cv::Point end, int lineWidth)
 {
     cv::Mat resultImage = binaryImage.clone(); // 克隆输入的二值图像
@@ -312,6 +298,7 @@ cv::Mat drawWhiteLine(cv::Mat binaryImage, cv::Point start, cv::Point end, int l
     return resultImage; // 返回绘制了白线的图像
 }
 
+// 功能: 提取巡线二值图（Sobel+亮度自适应+形态学），可选输出调试覆盖图
 cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr) 
 {
     const cv::Size targetSize(320, 240);
@@ -433,6 +420,7 @@ cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr)
     return finalImage;
 }
 
+// 功能: 基于巡线二值图逐行搜索车道左右边界并计算中线
 void Tracking(cv::Mat &dilated_image) 
 {
     // 参数检查
@@ -515,6 +503,7 @@ void Tracking(cv::Mat &dilated_image)
     last_mid = mid;
 }
 
+// 功能: 避障模式下的巡线追踪，使用历史障碍物高度作为搜索上界
 void Tracking_bz(cv::Mat &dilated_image) 
 {
     if (dilated_image.empty() || dilated_image.type() != CV_8U)
@@ -596,12 +585,14 @@ void Tracking_bz(cv::Mat &dilated_image)
 }
 
 // 比较两个轮廓的面积
+// 功能: 轮廓面积比较（用于排序，返回面积更大的在前）
 bool Contour_Area(vector<Point> contour1, vector<Point> contour2)
 {
     return contourArea(contour1) > contourArea(contour2); // 返回轮廓1是否大于轮廓2
 }
 
 // 定义蓝色挡板 寻找函数
+// 功能: 在限定ROI内通过HSV阈值查找蓝色挡板，带连续帧计数确认
 void blue_card_find(void)  // 输入为mask图像
 {   
     Mat change_frame; // 存储颜色空间转换后的图像
@@ -674,6 +665,7 @@ void blue_card_find(void)  // 输入为mask图像
 }
 
 // 检测蓝色挡板是否移开
+// 功能: 检测蓝色挡板是否移开（无有效轮廓即视为移开），触发发车
 void blue_card_remove(void) // 输入为mask图像
 {
     cout << "进入 蓝色挡板移开 进程！" << endl; // 输出进入移除蓝色挡板的过程
@@ -721,6 +713,7 @@ void blue_card_remove(void) // 输入为mask图像
     }
 }
 
+// 功能: 先裁剪斑马线ROI，再在ROI内做白色提取与形态学，统计矩形条纹数量
 int banma_get(cv::Mat &frame) {
     // 先裁剪感兴趣区域，减少后续处理数据量
     int roiWidth = std::min(BANMA_ROI_WIDTH, frame.cols - BANMA_ROI_X);
@@ -782,59 +775,9 @@ int banma_get(cv::Mat &frame) {
     }
 }
 
-int find_parking(cv::Mat frame) {
-    // 将图像转换为HSV颜色空间
-    cv::Mat hsv;
-    cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
 
-    // 定义红色的HSV范围
-    cv::Scalar lower_red1(0, 43, 46);
-    cv::Scalar upper_red1(10, 255, 255);
 
-    cv::Scalar lower_red2(156, 43, 46);
-    cv::Scalar upper_red2(180, 255, 255);
-
-    // 创建两个红色掩码并合并
-    cv::Mat mask1, mask2, mask;
-    cv::inRange(hsv, lower_red1, upper_red1, mask1);
-    cv::inRange(hsv, lower_red2, upper_red2, mask2);
-    cv::bitwise_or(mask1, mask2, mask);
-
-    // 执行形态学操作，可以根据实际情况调整参数
-    cv::Mat kernel = cv::Mat::ones(5, 5, CV_8UC1); // 5x5的卷积核
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel);  // 开运算 去除外部小噪点
-    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel); // 闭运算 去除内部小洞
-
-    // 寻找轮廓
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-
-    // 仅保留y轴在100-218范围内的轮廓  
-    std::vector<std::vector<cv::Point>> filtered_contours;
-    for (size_t i = 0; i < contours.size(); i++) {
-        cv::Rect bounding_box = cv::boundingRect(contours[i]);
-        if (bounding_box.y >= 100 && bounding_box.y <= 218) {
-            filtered_contours.push_back(contours[i]);
-        }
-    }
-
-    // 计算大于4000面积的轮廓数量
-    int large_contours_count = 0;
-    for (size_t i = 0; i < filtered_contours.size(); i++) {
-        double area = cv::contourArea(filtered_contours[i]);
-        if (area > 1000) {
-            large_contours_count++;
-        }
-    }
-
-    // 如果有两个以上的轮廓的面积大于4000，返回1
-    if (large_contours_count >= 1) {
-        return 1;
-    } else {
-        return 0;
-    }
-}
-
+// 功能: 常规巡线PD控制器，基于中线偏差计算舵机PWM
 float servo_pd(int target) { // 赛道巡线控制
 
     int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
@@ -863,12 +806,10 @@ float servo_pd(int target) { // 赛道巡线控制
     return servo_pwm; // 返回舵机PWM值
 }
 
+// 功能: 避障巡线PD控制器，权重更大，响应更快
 float servo_pd_bz(int target) { // 避障巡线控制
 
     int pidx = mid_bz[(int)(mid_bz.size() / 2)].x;
-
-    if(pidx < 158)
-        pidx = pidx - 5;
 
     cout << "[PID调试] 避障中线位置：" << pidx << endl;    
 
@@ -893,6 +834,7 @@ float servo_pd_bz(int target) { // 避障巡线控制
     return servo_pwm; // 返回舵机PWM值
 }
 
+// 功能: 停车阶段的PD控制器，基于车库检测中点
 float servo_pd_AB(int target) { // 避障巡线控制
 
     int pidx = park_mid; // 计算中点的x坐标
@@ -919,17 +861,9 @@ float servo_pd_AB(int target) { // 避障巡线控制
     }
     return servo_pwm; // 返回舵机PWM值
 }
-void motor_park(){
-    gpioPWM(13, motor_pwm_mid + 400);
-    gpioPWM(13, motor_pwm_mid); // 设置电机PWM
-    gpioPWM(13, motor_pwm_mid - 700); // 设置电机PWM
-    gpioPWM(13, motor_pwm_mid - 900);
-    usleep(800000); // 延时300毫秒
-    gpioPWM(12, servo_pwm_mid); // 设置舵机PWM
-    gpioPWM(13, motor_pwm_mid); // 设置电机PWM
-    // sleep(100);
-}
 
+
+// 功能: 根据最近识别的车库ID（A=1/B=2）执行入库动作序列
 void gohead(int parkchose){
     if(parkchose == 1 ){ //try to find park A
         std::cout << "[停车调试] 前往A车库目标，执行前进动作" << std::endl;
@@ -942,9 +876,6 @@ void gohead(int parkchose){
         // sleep(2);
         usleep(2200000);
         gpioPWM(13, motor_pwm_mid);
-        flag_park_find == 1;
-        flag_parkchose == 1;
-        sleep(100);
     }
     else if(parkchose == 2){ //try to find park B
         cout << "[停车调试] 前往B车库目标，执行前进动作" << endl;
@@ -957,18 +888,17 @@ void gohead(int parkchose){
         // usleep(1800000);
         sleep(2);
         gpioPWM(13, motor_pwm_mid);
-        flag_park_find == 1;
-        flag_parkchose == 1;
-        sleep(100);
     }
 }
 
+// 功能: 斑马线触发停车：电机回中、舵机回中并输出日志
 void banma_stop(){
     gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock); // 解锁状态，即停车
     gpioPWM(servo_pin, servo_pwm_mid); // 舵机回中
     cout << "[流程] 检测到斑马线，车辆停车3秒等待指令" << endl;
 }
 
+// 功能: 按照 `changeroad` 状态执行左/右变道动作序列
 void motor_changeroad(){
     if(changeroad == 1){ // 向左变道----------------------------------------------------------------
         gpioPWM(12, 825); // 设置舵机PWM
@@ -995,6 +925,7 @@ void motor_changeroad(){
 
 
 // 控制舵机电机
+// 功能: 根据状态机切换控制策略（巡线/避障/停车），并下发PWM
 void motor_servo_contral()
 {
     float servo_pwm_now;
@@ -1023,6 +954,7 @@ void motor_servo_contral()
 }
 
 //-----------------------------------------------------------------------------------主函数-----------------------------------------------
+// 功能: 主循环，完成相机初始化、状态机执行与控制闭环
 int main(void)
 {
     gpioTerminate();           // 终止GPIO操作
