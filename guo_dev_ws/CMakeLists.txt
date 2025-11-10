@@ -69,6 +69,14 @@ target_link_libraries(track_line
     ${CMAKE_THREAD_LIBS_INIT}
 )
 
+add_executable(track_line_test src/track_line_test.cpp)
+
+target_link_libraries(track_line_test
+    ${PIGPIO_LIBRARY}
+    ${OpenCV_LIBS}
+    ${CMAKE_THREAD_LIBS_INIT}
+)
+
 
 add_executable(test_sobel test/test_sobel.cpp)
 
