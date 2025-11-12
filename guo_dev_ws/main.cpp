@@ -180,15 +180,15 @@ const int BANMA_WHITE_V_MAX = 255;  // 亮度V最大值
 
 // 斑马线检测ROI区域
 const int BANMA_ROI_X = 2;           // ROI左上角X坐标
-const int BANMA_ROI_Y = 110;         // ROI左上角Y坐标
+const int BANMA_ROI_Y = 50;         // ROI左上角Y坐标
 const int BANMA_ROI_WIDTH = 318;     // ROI宽度
-const int BANMA_ROI_HEIGHT = 200;    // ROI高度
+const int BANMA_ROI_HEIGHT = 250;    // ROI高度
 
 // 斑马线矩形筛选尺寸（斑马线由多个白色矩形组成）
-const int BANMA_RECT_MIN_WIDTH = 10;   // 矩形最小宽度
-const int BANMA_RECT_MAX_WIDTH = 50;   // 矩形最大宽度
-const int BANMA_RECT_MIN_HEIGHT = 10;  // 矩形最小高度
-const int BANMA_RECT_MAX_HEIGHT = 50;  // 矩形最大高度
+const int BANMA_RECT_MIN_WIDTH = 5;   // 矩形最小宽度
+const int BANMA_RECT_MAX_WIDTH = 100;   // 矩形最大宽度
+const int BANMA_RECT_MIN_HEIGHT = 5;  // 矩形最小高度
+const int BANMA_RECT_MAX_HEIGHT = 100;  // 矩形最大高度
 
 // 斑马线判定阈值
 const int BANMA_MIN_COUNT = 6;  // 判定为斑马线需要的最少白色矩形数量
@@ -1048,7 +1048,7 @@ int main(int argc, char* argv[])
     // 初始化检测模型
     cout << "[初始化] 加载障碍物检测模型..." << endl;
     try {
-        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.4f, 0.4f, 4, false);
+        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.6f, 0.4f, 4, false);
         cout << "[初始化] 障碍物检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 障碍物检测模型加载失败: " << e.what() << endl;
@@ -1057,7 +1057,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载转向标志检测模型..." << endl;
     try {
-        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.8f, 0.5f, 4, false);
+        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.6f, 0.5f, 4, false);
         cout << "[初始化] 转向标志检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 转向标志检测模型加载失败: " << e.what() << endl;
@@ -1067,7 +1067,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载车库检测模型..." << endl;
     try {
-        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.8f, 0.5f, 4, false);
+        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.6f, 0.5f, 4, false);
         cout << "[初始化] 车库检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 车库检测模型加载失败: " << e.what() << endl;
