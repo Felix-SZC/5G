@@ -20,12 +20,12 @@ using namespace std; // 使用标准命名空间
 using namespace cv; // 使用OpenCV命名空间
 
 //------------速度参数配置------------------------------------------------------------------------------------------
-const int MOTOR_SPEED_DELTA_CRUISE = 1500; // 常规巡航速度增量
+const int MOTOR_SPEED_DELTA_CRUISE = 1300; // 常规巡航速度增量
 const int MOTOR_SPEED_DELTA_AVOID = 1300;  // 避障阶段速度增量
 const int MOTOR_SPEED_DELTA_PARK = 1300;   // 车库阶段速度增量
 
 //---------------调试选项-------------------------------------------------
-const bool SHOW_SOBEL_DEBUG = true; // 是否显示Sobel调试窗口
+const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
 const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，减轻imshow开销
 
 //---------------性能统计---------------------------------------------------
@@ -888,8 +888,8 @@ float servo_pd_bz(int target) { // 避障巡线控制
     int pidx = mid_bz[(int)(mid_bz.size() / 2)].x;
 
     // float kp = 1.5; // 比例系数
-    float kp = 1.5; // 比例系数
-    float kd = 3.0; // 微分系数
+    float kp = 2.0; // 比例系数
+    float kd = 5.0; // 微分系数
 
     error_first = target - pidx; // 计算误差
 
@@ -1048,7 +1048,7 @@ int main(int argc, char* argv[])
     // 初始化检测模型
     cout << "[初始化] 加载障碍物检测模型..." << endl;
     try {
-        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.6f, 0.4f, 4, false);
+        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.4f, 0.4f, 4, false);
         cout << "[初始化] 障碍物检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 障碍物检测模型加载失败: " << e.what() << endl;
@@ -1253,7 +1253,7 @@ int main(int argc, char* argv[])
 
                 // 只要在避障状态，就始终使用最后记录的位置进行补线
                 bz_heighest = last_known_bz_heighest; // 确保Tracking_bz使用正确的边界
-                if (last_known_bz_xcenter < 160) {
+                if (last_known_bz_xcenter > 160) {
                     bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_xcenter, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
                 } else {
                     bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_xcenter, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
@@ -1311,7 +1311,7 @@ int main(int argc, char* argv[])
                             bz_heighest = last_known_bz_heighest;
 
                             // 立即执行第一次补线和避障巡线
-                            if (last_known_bz_xcenter < 160) { 
+                            if (last_known_bz_xcenter > 160) { 
                                 bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_xcenter, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
                             } else { 
                                 bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_xcenter, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
