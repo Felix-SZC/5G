@@ -179,19 +179,19 @@ const int BANMA_WHITE_V_MIN = 200;  // 亮度V最小值（高亮度白色）
 const int BANMA_WHITE_V_MAX = 255;  // 亮度V最大值
 
 // 斑马线检测ROI区域
-const int BANMA_ROI_X = 2;           // ROI左上角X坐标
-const int BANMA_ROI_Y = 50;         // ROI左上角Y坐标
-const int BANMA_ROI_WIDTH = 318;     // ROI宽度
-const int BANMA_ROI_HEIGHT = 250;    // ROI高度
+const int BANMA_ROI_X = 20;           // ROI左上角X坐标
+const int BANMA_ROI_Y = 100;          // ROI左上角Y坐标
+const int BANMA_ROI_WIDTH = 280;      // ROI宽度
+const int BANMA_ROI_HEIGHT = 100;     // ROI高度
 
 // 斑马线矩形筛选尺寸（斑马线由多个白色矩形组成）
 const int BANMA_RECT_MIN_WIDTH = 5;   // 矩形最小宽度
-const int BANMA_RECT_MAX_WIDTH = 100;   // 矩形最大宽度
-const int BANMA_RECT_MIN_HEIGHT = 5;  // 矩形最小高度
-const int BANMA_RECT_MAX_HEIGHT = 100;  // 矩形最大高度
+const int BANMA_RECT_MAX_WIDTH = 40;  // 矩形最大宽度
+const int BANMA_RECT_MIN_HEIGHT = 5;   // 矩形最小高度
+const int BANMA_RECT_MAX_HEIGHT = 40;  // 矩形最大高度
 
 // 斑马线判定阈值
-const int BANMA_MIN_COUNT = 6;  // 判定为斑马线需要的最少白色矩形数量
+const int BANMA_MIN_COUNT = 4;  // 判定为斑马线需要的最少白色矩形数量
 
 // 形态学处理参数
 const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
@@ -779,61 +779,53 @@ void blue_card_remove(void) // 输入为mask图像
     }
 }
 
-// 功能: 先裁剪斑马线ROI，再在ROI内做白色提取与形态学，统计矩形条纹数量
+// 功能: 基于顶帽变换的斑马线检测，增强光照鲁棒性
 int banma_get(cv::Mat &frame) {
-    // 先裁剪感兴趣区域，减少后续处理数据量
+    // 1. 裁剪感兴趣区域 (ROI)
     int roiWidth = std::min(BANMA_ROI_WIDTH, frame.cols - BANMA_ROI_X);
     int roiHeight = std::min(BANMA_ROI_HEIGHT, frame.rows - BANMA_ROI_Y);
     if (roiWidth <= 0 || roiHeight <= 0) {
-        return 0;
+        return 0; // ROI无效
     }
     cv::Rect roi(BANMA_ROI_X, BANMA_ROI_Y, roiWidth, roiHeight);
-    cv::Mat roiFrame = frame(roi);
+    cv::Mat roiFrame = frame(roi).clone();
 
-    // 将ROI图像转换为HSV颜色空间
-    cv::Mat hsv;
-    cv::cvtColor(roiFrame, hsv, cv::COLOR_BGR2HSV);
+    // 2. 灰度化
+    cv::Mat grayRoi;
+    cv::cvtColor(roiFrame, grayRoi, cv::COLOR_BGR2GRAY);
 
-    // 定义白色的下界和上界（使用常量）
-    cv::Scalar lower_white(BANMA_WHITE_H_MIN, BANMA_WHITE_S_MIN, BANMA_WHITE_V_MIN);
-    cv::Scalar upper_white(BANMA_WHITE_H_MAX, BANMA_WHITE_S_MAX, BANMA_WHITE_V_MAX);
+    // 3. 顶帽变换 - 核心步骤，突出白色条纹
+    cv::Mat topHat;
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(15, 3));
+    cv::morphologyEx(grayRoi, topHat, cv::MORPH_TOPHAT, kernel);
 
-    // 创建白色掩码
-    cv::Mat mask1;
-    cv::inRange(hsv, lower_white, upper_white, mask1);
+    // 4. 二值化
+    cv::Mat binaryMask;
+    cv::threshold(topHat, binaryMask, 50, 255, cv::THRESH_BINARY);
+    
+    // 5. 形态学开运算，去除小的噪声点
+    cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    cv::morphologyEx(binaryMask, binaryMask, cv::MORPH_OPEN, openKernel);
 
-    // 创建形态学处理的结构元素（使用常量）
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT,
-                                               cv::Size(BANMA_MORPH_KERNEL_SIZE, BANMA_MORPH_KERNEL_SIZE));
-    // 对掩码进行膨胀和腐蚀操作
-    cv::dilate(mask1, mask1, kernel);
-    cv::erode(mask1, mask1, kernel);
-
-    // 查找图像中的轮廓
+    // 6. 查找轮廓并筛选
     std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(mask1, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    cv::findContours(binaryMask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
-    // 创建一个副本以便绘制轮廓
-    cv::Mat contour_img = mask1.clone();
-
-    int count_BMX = 0;  // 斑马线计数器
-
-    // 遍历每个找到的轮廓
+    int count_BMX = 0;
     for (const auto& contour : contours) {
-        cv::Rect rect = cv::boundingRect(contour);  // 获取当前轮廓的外接矩形 rect
+        cv::Rect rect = cv::boundingRect(contour);
 
-        // 筛选符合尺寸的矩形（使用常量）
-        if (BANMA_RECT_MIN_HEIGHT <= rect.height && rect.height < BANMA_RECT_MAX_HEIGHT &&
-            BANMA_RECT_MIN_WIDTH <= rect.width && rect.width < BANMA_RECT_MAX_WIDTH) {
-            // 过滤赛道外的轮廓
-            cv::rectangle(contour_img, rect, cv::Scalar(255), 2);
+        // 应用尺寸筛选
+        if (rect.width >= BANMA_RECT_MIN_WIDTH && rect.width <= BANMA_RECT_MAX_WIDTH &&
+            rect.height >= BANMA_RECT_MIN_HEIGHT && rect.height <= BANMA_RECT_MAX_HEIGHT)
+        {
             count_BMX++;
         }
     }
 
-    // 最终返回值（使用常量）
+    // 7. 最终判定
     if (count_BMX >= BANMA_MIN_COUNT) {
-        cout << "检测到斑马线（白色矩形数量：" << count_BMX << "）" << endl;
+        cout << "检测到斑马线（有效矩形数量：" << count_BMX << "）" << endl;
         return 1;
     }
     else {
@@ -963,8 +955,10 @@ void gohead(int parkchose){
     }
 }
 
-// 功能: 斑马线触发停车：电机回中、舵机回中并输出日志
+// 功能: 斑马线触发停车：电机回中、舵机回中并输出日志usleep(1200000)
 void banma_stop(){
+    gpioPWM(motor_pin, motor_pwm_mid - 3000); 
+    usleep(500000);
     gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock); // 解锁状态，即停车
     gpioPWM(servo_pin, servo_pwm_mid); // 舵机回中
     cout << "[流程] 检测到斑马线，车辆停车3秒等待指令" << endl;
@@ -973,25 +967,30 @@ void banma_stop(){
 // 功能: 按照 `changeroad` 状态执行左/右变道动作序列
 void motor_changeroad(){
     if(changeroad == 1){ // 向左变道----------------------------------------------------------------
-        gpioPWM(12, 825); // 设置舵机PWM
+        gpioPWM(12, 1130); // 设置舵机PWM
+        usleep(500000); // RIGHT弯道
+        gpioPWM(12, 1130); // 设置舵机PWM
         gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(1200000); // RIGHT弯道
-        // usleep(1000000); // LEFT弯道
-        gpioPWM(12, 610); // 设置舵机PWM
+        usleep(1000000); // RIGHT弯道
+        gpioPWM(12, 460); // 设置舵机PWM
         gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(800000); // 延时550毫秒
-        gpioPWM(12, servo_pwm_mid); // 设置舵机PWM
-        gpioPWM(13, motor_pwm_mid + 1400); // 设置电机PWM
+        usleep(1000000); // 延时1000毫秒
+        gpioPWM(12, 900); // 设置舵机PWM
+        gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
+        usleep(600000); // 延时600毫秒
     }
     else if(changeroad == 2){ //向右变道----------------------------------------------------------------
-        gpioPWM(12, 620); // 设置舵机PWM
+        gpioPWM(12, 330); // 设置舵机PWM
+        usleep(500000);
+        gpioPWM(12, 330); // 设置舵机PWM
         gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(1400000);
-        gpioPWM(12, 820); // 设置舵机PWM
+        usleep(1000000);
+        gpioPWM(12, 1000); // 设置舵机PWM
         gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(500000); // 延时550毫秒
-        gpioPWM(12, servo_pwm_mid); // 设置舵机PWM
-        gpioPWM(13, motor_pwm_mid + 1400); // 设置电机PWM
+        usleep(1000000); // 延时1000毫秒
+        gpioPWM(12, 560); // 设置舵机PWM
+        gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
+        usleep(600000); // 延时1000毫秒
     }
 }
 
@@ -1057,7 +1056,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载转向标志检测模型..." << endl;
     try {
-        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.6f, 0.5f, 4, false);
+        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.3f, 0.5f, 4, false);
         cout << "[初始化] 转向标志检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 转向标志检测模型加载失败: " << e.what() << endl;
@@ -1254,9 +1253,9 @@ int main(int argc, char* argv[])
                 // 只要在避障状态，就始终使用最后记录的位置进行补线
                 bz_heighest = last_known_bz_heighest; // 确保Tracking_bz使用正确的边界
                 if (last_known_bz_xcenter > 160) {
-                    bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_xcenter, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
+                    bin_image = drawWhiteLine(bin_image, cv::Point(box_x1, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
                 } else {
-                    bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_xcenter, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
+                    bin_image = drawWhiteLine(bin_image, cv::Point(box_x2, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
                 }
                 Tracking_bz(bin_image);
 
@@ -1312,9 +1311,9 @@ int main(int argc, char* argv[])
 
                             // 立即执行第一次补线和避障巡线
                             if (last_known_bz_xcenter > 160) { 
-                                bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_xcenter, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
+                                bin_image = drawWhiteLine(bin_image, cv::Point(box_x1, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
                             } else { 
-                                bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_xcenter, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
+                                bin_image = drawWhiteLine(bin_image, cv::Point(box_x2, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
                             }
                             Tracking_bz(bin_image); 
                         }
