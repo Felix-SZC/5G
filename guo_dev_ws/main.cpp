@@ -96,12 +96,12 @@ std::vector<cv::Point> left_line_bz; // 存储左线条
 std::vector<cv::Point> right_line_bz; // 存储右线条
 std::vector<cv::Point> last_mid_bz; // 存储上一帧避障中线
 bool is_in_avoidance = false; // 是否处于避障状态锁
-int last_known_bz_xcenter = 0; // 最后一次检测到的障碍物位置
-int last_known_bz_bottom = 0;
-int last_known_bz_heighest = 0;
+int last_known_bz_xcenter = 0; // 最后一次检测到的障碍物中心
+int last_known_bz_x1 = 0;      // 最后一次检测到的障碍物左边界
+int last_known_bz_x2 = 0;      // 最后一次检测到的障碍物右边界
 int count_bz = 0; // 避障计数器
 int bz_disappear_count = 0; // 障碍物连续消失计数器
-const int BZ_DISAPPEAR_THRESHOLD = 5; // 确认障碍物消失的帧数阈值
+const int BZ_DISAPPEAR_THRESHOLD = 10; // 确认障碍物消失的帧数阈值
 int bz_y2 = 170; // 可见障碍物底部阈值
 
 //----------------停车相关---------------------------------------------------
@@ -196,6 +196,10 @@ const int BANMA_MIN_COUNT = 4;  // 判定为斑马线需要的最少白色矩形
 // 形态学处理参数
 const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
 
+//--------------- 巡线与避障ROI参数 ------------------------------------
+const int LINE_ROI_TOP_Y = 109;           // 巡线ROI上边界Y坐标
+const int LINE_ROI_BOTTOM_Y = 153;        // 巡线ROI下边界（搜索起始Y）
+const int LINE_ROI_SEARCH_START_Y = 110;  // 巡线搜索终止Y
 
 //--------------------------------------------------------------------------
 
@@ -551,20 +555,15 @@ void Tracking_bz(cv::Mat &dilated_image)
         {
             sum_x += last_mid_bz[i].x;
         }
-        begin = sum_x / sample_count;
+        if (sample_count > 0) begin = sum_x / sample_count;
     }
 
     left_line_bz.clear(); // 清空避障左线条
     right_line_bz.clear(); // 清空避障右线条
     mid_bz.clear(); // 清空避障中线
 
-    int lower_bound = bz_heighest;
-    if (lower_bound < 0 || lower_bound > 153)
-    {
-        lower_bound = 110; // 回落到安全的巡线搜索下限
-    }
-
-    for (int i = 153; i >= lower_bound; --i)
+    // 避障巡线范围与常规巡线保持一致
+    for (int i = LINE_ROI_BOTTOM_Y; i >= LINE_ROI_SEARCH_START_Y; --i)
     {
         int left = begin;
         int right = begin;
@@ -1234,28 +1233,29 @@ int main(int argc, char* argv[])
                 if (!result.empty()) {
                     DetectObject box = result.at(0);
                     int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
-                    if (box_y2 < bz_y2) {
+
+                    // 新逻辑：障碍物底部仍在巡线ROI内，则更新其位置
+                    if (box_y2 > LINE_ROI_TOP_Y) {
                         bz_get = 1;
-                        int box_x1 = static_cast<int>(box.rect.x);
-                        int box_x2 = static_cast<int>(box.rect.x + box.rect.width);
-                        int box_y1 = static_cast<int>(box.rect.y);
-                        last_known_bz_xcenter = (box_x1 + box_x2) / 2;
-                        last_known_bz_bottom = box_y2;
-                        last_known_bz_heighest = box_y1;
+                        // 更新最后一次看到的障碍物所有位置信息
+                        last_known_bz_x1 = static_cast<int>(box.rect.x);
+                        last_known_bz_x2 = static_cast<int>(box.rect.x + box.rect.width);
+                        last_known_bz_xcenter = (last_known_bz_x1 + last_known_bz_x2) / 2;
                         bz_disappear_count = 0; // 障碍物可见，重置消失计数
                     }
                 }
 
                 if (bz_get == 0) {
-                    bz_disappear_count++; // 障碍物不可见，累加消失计数
+                    bz_disappear_count++; // 障碍物不可见或太远，累加消失计数
                 }
 
                 // 只要在避障状态，就始终使用最后记录的位置进行补线
-                bz_heighest = last_known_bz_heighest; // 确保Tracking_bz使用正确的边界
                 if (last_known_bz_xcenter > 160) {
-                    bin_image = drawWhiteLine(bin_image, cv::Point(box_x1, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
+                    // 障碍物在右，从左边界规划路径
+                    bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x1, LINE_ROI_TOP_Y), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), LINE_ROI_BOTTOM_Y + 2), 8);
                 } else {
-                    bin_image = drawWhiteLine(bin_image, cv::Point(box_x2, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
+                    // 障碍物在左，从右边界规划路径
+                    bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x2, LINE_ROI_TOP_Y), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), LINE_ROI_BOTTOM_Y + 2), 8);
                 }
                 Tracking_bz(bin_image);
 
@@ -1295,25 +1295,22 @@ int main(int argc, char* argv[])
                     if (result.size() > 0) { 
                         DetectObject box = result.at(0);
                         int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
-                        if (box_y2 < bz_y2) { 
+                        // 新逻辑：障碍物底部进入巡线ROI才启动避障
+                        if (box_y2 > LINE_ROI_TOP_Y) { 
                             bz_get = 1; 
                             is_in_avoidance = true; // 启动并锁定避障状态
                             cout << "[流程] 检测到障碍物，进入避障模式" << endl;
                             
                             // 记录障碍物的初始位置
-                            int box_x1 = static_cast<int>(box.rect.x);
-                            int box_x2 = static_cast<int>(box.rect.x + box.rect.width);
-                            int box_y1 = static_cast<int>(box.rect.y);
-                            last_known_bz_xcenter = (box_x1 + box_x2) / 2;
-                            last_known_bz_bottom = box_y2;
-                            last_known_bz_heighest = box_y1;
-                            bz_heighest = last_known_bz_heighest;
+                            last_known_bz_x1 = static_cast<int>(box.rect.x);
+                            last_known_bz_x2 = static_cast<int>(box.rect.x + box.rect.width);
+                            last_known_bz_xcenter = (last_known_bz_x1 + last_known_bz_x2) / 2;
 
                             // 立即执行第一次补线和避障巡线
                             if (last_known_bz_xcenter > 160) { 
-                                bin_image = drawWhiteLine(bin_image, cv::Point(box_x1, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
+                                bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x1, LINE_ROI_TOP_Y), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), LINE_ROI_BOTTOM_Y + 2), 8);
                             } else { 
-                                bin_image = drawWhiteLine(bin_image, cv::Point(box_x2, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
+                                bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x2, LINE_ROI_TOP_Y), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), LINE_ROI_BOTTOM_Y + 2), 8);
                             }
                             Tracking_bz(bin_image); 
                         }
