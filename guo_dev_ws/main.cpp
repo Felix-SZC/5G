@@ -40,8 +40,8 @@ std::vector<DetectObject> result_ab; // 存储FastestDet检测结果
 // 模型路径配置
 std::string model_param_obs = "models/obs.param";
 std::string model_bin_obs = "models/obs.bin";
-int num_classes_obs = 2; // 更新为2类以匹配新模型
-std::vector<std::string> labels_obs{"blue", "yellow"}; // 更新标签
+int num_classes_obs = 1;
+std::vector<std::string> labels_obs{"zhuitong"};
 
 std::string model_param_lr = "models/lr.param";
 std::string model_bin_lr = "models/lr.bin";
@@ -82,16 +82,8 @@ int fache_sign = 0; // 标记发车信号
 
 //---------------斑马线相关-------------------------------------------------
 int banma = 0; // 斑马线检测结果
-bool is_zebra_visible = false; // 新增：用于标记斑马线是否可见，以抑制循迹干扰
 
 //----------------变道相关---------------------------------------------------
-// 新增：闭环变道状态机
-enum LaneChangeState { LANE_CHANGE_NONE, START_TURN, CROSS_LANE, ALIGN_LANE };
-LaneChangeState g_lane_change_state = LANE_CHANGE_NONE;
-int g_lane_change_direction = 0; // 1=左, 2=右
-std::chrono::steady_clock::time_point g_lane_change_timer;
-bool g_is_returning_to_lane = false; // 新增：标记是否处于"回归原车道"阶段
-
 int changeroad = 0; // 变道检测结果 (0=未识别, 1=左转, 2=右转)
 bool has_detected_turn_sign = false; // 是否已成功识别到转向标识
 
@@ -104,14 +96,12 @@ std::vector<cv::Point> left_line_bz; // 存储左线条
 std::vector<cv::Point> right_line_bz; // 存储右线条
 std::vector<cv::Point> last_mid_bz; // 存储上一帧避障中线
 bool is_in_avoidance = false; // 是否处于避障状态锁
-int last_known_bz_xcenter = 0; // 最后一次检测到的障碍物中心
-int last_known_bz_x1 = 0;      // 最后一次检测到的障碍物左边界
-int last_known_bz_x2 = 0;      // 最后一次检测到的障碍物右边界
+int last_known_bz_xcenter = 0; // 最后一次检测到的障碍物位置
+int last_known_bz_bottom = 0;
+int last_known_bz_heighest = 0;
 int count_bz = 0; // 避障计数器
 int bz_disappear_count = 0; // 障碍物连续消失计数器
-const int BZ_DISAPPEAR_THRESHOLD = 10; // 确认障碍物消失的帧数阈值
-int bz_detect_count = 0;                 // 新增：障碍物连续检测计数器
-const int BZ_DETECT_THRESHOLD = 5;       // 新增：确认障碍物出现的帧数阈值
+const int BZ_DISAPPEAR_THRESHOLD = 5; // 确认障碍物消失的帧数阈值
 int bz_y2 = 170; // 可见障碍物底部阈值
 
 //----------------停车相关---------------------------------------------------
@@ -121,12 +111,8 @@ int flag_turn_done = 0; // 转向完成标志
 std::chrono::steady_clock::time_point zebra_stop_start_time;
 bool is_stopping_at_zebra = false;
 bool is_parking_phase = false; // 是否进入寻找车库阶段
+int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
 const int PARKING_Y_THRESHOLD = 200; // 触发入库的Y轴阈值
-
-// 新增：停车阶段逻辑变量
-bool is_following_park_target = false; // 是否在跟随A/B目标
-int count_park_A = 0;                  // A车库看到次数
-int count_park_B = 0;                  // B车库看到次数
 
 // 定义舵机和电机引脚号、PWM范围、PWM频率、PWM占空比解锁值
 const int servo_pin = 12; // 存储舵机引脚号
@@ -193,27 +179,23 @@ const int BANMA_WHITE_V_MIN = 200;  // 亮度V最小值（高亮度白色）
 const int BANMA_WHITE_V_MAX = 255;  // 亮度V最大值
 
 // 斑马线检测ROI区域
-const int BANMA_ROI_X = 20;           // ROI左上角X坐标
-const int BANMA_ROI_Y = 100;          // ROI左上角Y坐标
-const int BANMA_ROI_WIDTH = 280;      // ROI宽度
-const int BANMA_ROI_HEIGHT = 100;     // ROI高度
+const int BANMA_ROI_X = 2;           // ROI左上角X坐标
+const int BANMA_ROI_Y = 50;         // ROI左上角Y坐标
+const int BANMA_ROI_WIDTH = 318;     // ROI宽度
+const int BANMA_ROI_HEIGHT = 250;    // ROI高度
 
 // 斑马线矩形筛选尺寸（斑马线由多个白色矩形组成）
-const int BANMA_RECT_MIN_WIDTH = 10;   // 矩形最小宽度
-const int BANMA_RECT_MAX_WIDTH = 40;  // 矩形最大宽度
-const int BANMA_RECT_MIN_HEIGHT = 10;   // 矩形最小高度
-const int BANMA_RECT_MAX_HEIGHT = 40;  // 矩形最大高度
+const int BANMA_RECT_MIN_WIDTH = 5;   // 矩形最小宽度
+const int BANMA_RECT_MAX_WIDTH = 100;   // 矩形最大宽度
+const int BANMA_RECT_MIN_HEIGHT = 5;  // 矩形最小高度
+const int BANMA_RECT_MAX_HEIGHT = 100;  // 矩形最大高度
 
 // 斑马线判定阈值
-const int BANMA_MIN_COUNT = 4;  // 判定为斑马线需要的最少白色矩形数量
+const int BANMA_MIN_COUNT = 6;  // 判定为斑马线需要的最少白色矩形数量
 
 // 形态学处理参数
 const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
 
-//--------------- 巡线与避障ROI参数 ------------------------------------
-const int LINE_ROI_TOP_Y = 109;           // 巡线ROI上边界Y坐标
-const int LINE_ROI_BOTTOM_Y = 153;        // 巡线ROI下边界（搜索起始Y）
-const int LINE_ROI_SEARCH_START_Y = 110;  // 巡线搜索终止Y
 
 //--------------------------------------------------------------------------
 
@@ -569,15 +551,20 @@ void Tracking_bz(cv::Mat &dilated_image)
         {
             sum_x += last_mid_bz[i].x;
         }
-        if (sample_count > 0) begin = sum_x / sample_count;
+        begin = sum_x / sample_count;
     }
 
     left_line_bz.clear(); // 清空避障左线条
     right_line_bz.clear(); // 清空避障右线条
     mid_bz.clear(); // 清空避障中线
 
-    // 避障巡线范围与常规巡线保持一致
-    for (int i = LINE_ROI_BOTTOM_Y; i >= LINE_ROI_SEARCH_START_Y; --i)
+    int lower_bound = bz_heighest;
+    if (lower_bound < 0 || lower_bound > 153)
+    {
+        lower_bound = 110; // 回落到安全的巡线搜索下限
+    }
+
+    for (int i = 153; i >= lower_bound; --i)
     {
         int left = begin;
         int right = begin;
@@ -792,53 +779,61 @@ void blue_card_remove(void) // 输入为mask图像
     }
 }
 
-// 功能: 基于顶帽变换的斑马线检测，增强光照鲁棒性
+// 功能: 先裁剪斑马线ROI，再在ROI内做白色提取与形态学，统计矩形条纹数量
 int banma_get(cv::Mat &frame) {
-    // 1. 裁剪感兴趣区域 (ROI)
+    // 先裁剪感兴趣区域，减少后续处理数据量
     int roiWidth = std::min(BANMA_ROI_WIDTH, frame.cols - BANMA_ROI_X);
     int roiHeight = std::min(BANMA_ROI_HEIGHT, frame.rows - BANMA_ROI_Y);
     if (roiWidth <= 0 || roiHeight <= 0) {
-        return 0; // ROI无效
+        return 0;
     }
     cv::Rect roi(BANMA_ROI_X, BANMA_ROI_Y, roiWidth, roiHeight);
-    cv::Mat roiFrame = frame(roi).clone();
+    cv::Mat roiFrame = frame(roi);
 
-    // 2. 灰度化
-    cv::Mat grayRoi;
-    cv::cvtColor(roiFrame, grayRoi, cv::COLOR_BGR2GRAY);
+    // 将ROI图像转换为HSV颜色空间
+    cv::Mat hsv;
+    cv::cvtColor(roiFrame, hsv, cv::COLOR_BGR2HSV);
 
-    // 3. 顶帽变换 - 核心步骤，突出白色条纹
-    cv::Mat topHat;
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(15, 3));
-    cv::morphologyEx(grayRoi, topHat, cv::MORPH_TOPHAT, kernel);
+    // 定义白色的下界和上界（使用常量）
+    cv::Scalar lower_white(BANMA_WHITE_H_MIN, BANMA_WHITE_S_MIN, BANMA_WHITE_V_MIN);
+    cv::Scalar upper_white(BANMA_WHITE_H_MAX, BANMA_WHITE_S_MAX, BANMA_WHITE_V_MAX);
 
-    // 4. 二值化
-    cv::Mat binaryMask;
-    cv::threshold(topHat, binaryMask, 50, 255, cv::THRESH_BINARY);
-    
-    // 5. 形态学开运算，去除小的噪声点
-    cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-    cv::morphologyEx(binaryMask, binaryMask, cv::MORPH_OPEN, openKernel);
+    // 创建白色掩码
+    cv::Mat mask1;
+    cv::inRange(hsv, lower_white, upper_white, mask1);
 
-    // 6. 查找轮廓并筛选
+    // 创建形态学处理的结构元素（使用常量）
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT,
+                                               cv::Size(BANMA_MORPH_KERNEL_SIZE, BANMA_MORPH_KERNEL_SIZE));
+    // 对掩码进行膨胀和腐蚀操作
+    cv::dilate(mask1, mask1, kernel);
+    cv::erode(mask1, mask1, kernel);
+
+    // 查找图像中的轮廓
     std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(binaryMask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    cv::findContours(mask1, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
-    int count_BMX = 0;
+    // 创建一个副本以便绘制轮廓
+    cv::Mat contour_img = mask1.clone();
+
+    int count_BMX = 0;  // 斑马线计数器
+
+    // 遍历每个找到的轮廓
     for (const auto& contour : contours) {
-        cv::Rect rect = cv::boundingRect(contour);
+        cv::Rect rect = cv::boundingRect(contour);  // 获取当前轮廓的外接矩形 rect
 
-        // 应用尺寸筛选
-        if (rect.width >= BANMA_RECT_MIN_WIDTH && rect.width <= BANMA_RECT_MAX_WIDTH &&
-            rect.height >= BANMA_RECT_MIN_HEIGHT && rect.height <= BANMA_RECT_MAX_HEIGHT)
-        {
+        // 筛选符合尺寸的矩形（使用常量）
+        if (BANMA_RECT_MIN_HEIGHT <= rect.height && rect.height < BANMA_RECT_MAX_HEIGHT &&
+            BANMA_RECT_MIN_WIDTH <= rect.width && rect.width < BANMA_RECT_MAX_WIDTH) {
+            // 过滤赛道外的轮廓
+            cv::rectangle(contour_img, rect, cv::Scalar(255), 2);
             count_BMX++;
         }
     }
 
-    // 7. 最终判定
+    // 最终返回值（使用常量）
     if (count_BMX >= BANMA_MIN_COUNT) {
-        cout << "检测到斑马线（有效矩形数量：" << count_BMX << "）" << endl;
+        cout << "检测到斑马线（白色矩形数量：" << count_BMX << "）" << endl;
         return 1;
     }
     else {
@@ -944,31 +939,32 @@ float servo_pd_AB(int target) { // 避障巡线控制
 void gohead(int parkchose){
     if(parkchose == 1 ){ //try to find park A
         std::cout << "[停车调试] 前往A车库目标，执行前进动作" << std::endl;
-        gpioPWM(motor_pin, motor_pwm_mid + 1000); // 设置电机PWM
-        gpioPWM(servo_pin, servo_pwm_mid + 200); // 设置舵机PW0M
+        gpioPWM(13, motor_pwm_mid + 2800);
+        gpioPWM(13, motor_pwm_mid + 800); // 设置电机PWM
+        gpioPWM(12, 690); // 设置舵机PW0M
         sleep(1);
-        gpioPWM(motor_pin, motor_pwm_mid + 1000); // 设置电机PWM
-        gpioPWM(servo_pin, servo_pwm_mid -100); // 设置舵机PW0M
-        sleep(2);
-        gpioPWM(motor_pin, motor_pwm_mid);
+        gpioPWM(13, motor_pwm_mid + 800); // 设置电机PWM
+        gpioPWM(12, 780); // 设置舵机PW0M
+        // sleep(2);
+        usleep(2200000);
+        gpioPWM(13, motor_pwm_mid);
     }
     else if(parkchose == 2){ //try to find park B
         cout << "[停车调试] 前往B车库目标，执行前进动作" << endl;
-        gpioPWM(motor_pin, motor_pwm_mid + 1000); // 设置电机PWM
-        gpioPWM(servo_pin, servo_pwm_mid - 200); // 设置舵机PWM
+        gpioPWM(13, motor_pwm_mid + 2800);
+        gpioPWM(13, motor_pwm_mid + 800); // 设置电机PWM
+        gpioPWM(12, 690); // 设置舵机PWM
         sleep(1);
-        gpioPWM(motor_pin, motor_pwm_mid + 1000); // 设置电机PWM
-        gpioPWM(servo_pin, servo_pwm_mid + 100); // 设置舵机PW0M
+        gpioPWM(13, motor_pwm_mid + 800); // 设置电机PWM
+        gpioPWM(12, 650); // 设置舵机PW0M
         // usleep(1800000);
         sleep(2);
-        gpioPWM(motor_pin, motor_pwm_mid);
+        gpioPWM(13, motor_pwm_mid);
     }
 }
 
-// 功能: 斑马线触发停车：电机回中、舵机回中并输出日志usleep(1200000)
+// 功能: 斑马线触发停车：电机回中、舵机回中并输出日志
 void banma_stop(){
-    gpioPWM(motor_pin, motor_pwm_mid - 3000); 
-    usleep(500000);
     gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock); // 解锁状态，即停车
     gpioPWM(servo_pin, servo_pwm_mid); // 舵机回中
     cout << "[流程] 检测到斑马线，车辆停车3秒等待指令" << endl;
@@ -977,30 +973,25 @@ void banma_stop(){
 // 功能: 按照 `changeroad` 状态执行左/右变道动作序列
 void motor_changeroad(){
     if(changeroad == 1){ // 向左变道----------------------------------------------------------------
-        gpioPWM(servo_pin, 1130); // 设置舵机PWM
-        usleep(500000); // RIGHT弯道
-        gpioPWM(servo_pin, 1130); // 设置舵机PWM
-        gpioPWM(motor_pin, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(1000000); // RIGHT弯道
-        gpioPWM(servo_pin, 460); // 设置舵机PWM
-        gpioPWM(motor_pin, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(1000000); // 延时1000毫秒
-        gpioPWM(servo_pin, 900); // 设置舵机PWM
-        gpioPWM(motor_pin, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(600000); // 延时600毫秒
+        gpioPWM(12, 825); // 设置舵机PWM
+        gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
+        usleep(1200000); // RIGHT弯道
+        // usleep(1000000); // LEFT弯道
+        gpioPWM(12, 610); // 设置舵机PWM
+        gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
+        usleep(800000); // 延时550毫秒
+        gpioPWM(12, servo_pwm_mid); // 设置舵机PWM
+        gpioPWM(13, motor_pwm_mid + 1400); // 设置电机PWM
     }
     else if(changeroad == 2){ //向右变道----------------------------------------------------------------
-        gpioPWM(servo_pin, 330); // 设置舵机PWM
-        usleep(500000);
-        gpioPWM(servo_pin, 330); // 设置舵机PWM
-        gpioPWM(motor_pin, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(1000000);
-        gpioPWM(servo_pin, 1000); // 设置舵机PWM
-        gpioPWM(motor_pin, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(1000000); // 延时1000毫秒
-        gpioPWM(servo_pin, 560); // 设置舵机PWM
-        gpioPWM(motor_pin, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(600000); // 延时1000毫秒
+        gpioPWM(12, 620); // 设置舵机PWM
+        gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
+        usleep(1400000);
+        gpioPWM(12, 820); // 设置舵机PWM
+        gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
+        usleep(500000); // 延时550毫秒
+        gpioPWM(12, servo_pwm_mid); // 设置舵机PWM
+        gpioPWM(13, motor_pwm_mid + 1400); // 设置电机PWM
     }
 }
 
@@ -1011,29 +1002,8 @@ void motor_servo_contral()
 {
     float servo_pwm_now;
 
-    // 优先级 1: 闭环变道
-    if (g_lane_change_state != LANE_CHANGE_NONE)
-    {
-        if (g_lane_change_state == START_TURN) {
-            // 阶段1: 大角度转向以脱离当前车道
-            servo_pwm_now = (g_lane_change_direction == 1) ? 1100 : 480; // 左转给大舵角, 右转给小舵角
-        } else if (g_lane_change_state == CROSS_LANE) {
-            // 阶段2: 维持一定角度，直到找到新车道
-            servo_pwm_now = (g_lane_change_direction == 1) ? 950 : 600;
-        } else { // ALIGN_LANE
-            // 阶段3: 使用常规PD控制器对齐新车道
-            servo_pwm_now = servo_pd(160);
-        }
-        gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE); // 变道时使用常规速度
-    }
-    // 优先级 2: 看到斑马线，保持直行
-    else if (is_zebra_visible)
-    {
-        servo_pwm_now = servo_pwm_mid;
-        // 速度由 banma_stop() 控制，这里不重复设置
-    }
     // 如果正在停车，则由主循环的计时器逻辑控制，这里不执行任何操作
-    else if (is_stopping_at_zebra) {
+    if (is_stopping_at_zebra) {
         return;
     }
 
@@ -1045,13 +1015,7 @@ void motor_servo_contral()
     if (is_parking_phase)
     {
         // 状态4: 寻找并进入车库
-        if (is_following_park_target) {
-            // 如果看到了A/B标志，则使用PD对准标志中心
-            servo_pwm_now = servo_pd_AB(160); // servo_pd_AB 使用全局 'park_mid'
-        } else {
-            // 如果没看到A/B标志，则继续常规巡线
-            servo_pwm_now = servo_pd(160);
-        }
+        servo_pwm_now = servo_pd_AB(160); // 使用为停车优化的PD控制
         gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK); // 停车时使用稳定速度
     }
     else if (is_in_avoidance) { // 使用避障状态锁来决定控制策略
@@ -1093,7 +1057,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载转向标志检测模型..." << endl;
     try {
-        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.3f, 0.5f, 4, false);
+        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.6f, 0.5f, 4, false);
         cout << "[初始化] 转向标志检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 转向标志检测模型加载失败: " << e.what() << endl;
@@ -1211,14 +1175,15 @@ int main(int argc, char* argv[])
                         cout << "[流程] 检测到转向标识：" << (changeroad == 1 ? "左转" : "右转") << endl;
                     }
                 } else {
-                    // 3秒结束，检查是否已成功识别到转向标识
+                    // 3秒结束，检查是否已识别到转向标识
                     if (has_detected_turn_sign) {
-                        // 已识别到转向标识，启动闭环变道状态机，取代旧的motor_changeroad()
+                        // 已识别到转向标识，执行转向
                         is_stopping_at_zebra = false;
-                        g_lane_change_state = START_TURN;
-                        g_lane_change_direction = changeroad;
-                        g_lane_change_timer = std::chrono::steady_clock::now();
-                        cout << "[流程] 停车时间结束，开始执行闭环变道 -> " << (changeroad == 1 ? "左转" : "右转") << endl;
+                        cout << "[流程] 停车时间结束，执行" << (changeroad == 1 ? "左转" : "右转") << "动作" << endl;
+                        motor_changeroad(); // 执行转向动作
+                        flag_turn_done = 1; // 标记转向完成
+                        is_parking_phase = true; // 进入寻找车库阶段
+                        cout << "[流程] 转向完成，开始寻找并识别A/B车库" << endl;
                     } else {
                         // 未识别到转向标识，继续等待并检测
                         cout << "[警告] 未检测到转向标识，继续等待识别..." << endl;
@@ -1228,112 +1193,36 @@ int main(int argc, char* argv[])
             }
             else if (is_parking_phase)
             {
-                // 状态4: 寻找并进入车库。融合了常规巡线、目标搜索、目标跟随、计数和最终决策
-                Tracking(bin_image); // 识别常规车道线
-
-                // 新增：闭环变道状态机逻辑
-                if (g_lane_change_state != LANE_CHANGE_NONE)
-                {
-                    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_lane_change_timer).count();
-
-                    if (g_lane_change_state == START_TURN)
-                    {
-                        if (elapsed_ms > 800) { // 阶段1持续时间
-                            g_lane_change_state = CROSS_LANE;
-                            cout << "[变道] 状态 -> 正在穿越 (CROSS_LANE)" << endl;
-                        }
-                    }
-                    else if (g_lane_change_state == CROSS_LANE)
-                    {
-                        // 检查是否已经找到新车道线
-                        bool found_new_lane = false;
-                        if (g_lane_change_direction == 1 && !left_line.empty()) { // 左转时，寻找左侧车道线
-                            if (left_line.back().x > 5) found_new_lane = true; // 左线不再贴边
-                        } else if (g_lane_change_direction == 2 && !right_line.empty()) { // 右转时，寻找右侧车道线
-                            if (right_line.back().x < 315) found_new_lane = true; // 右线不再贴边
-                        }
-
-                        if (found_new_lane) {
-                            g_lane_change_state = ALIGN_LANE;
-                            g_lane_change_timer = std::chrono::steady_clock::now();
-                            cout << "[变道] 状态 -> 对齐新车道 (ALIGN_LANE)" << endl;
-                        }
-                    }
-                    else if (g_lane_change_state == ALIGN_LANE)
-                    {
-                        if (elapsed_ms > 1500) { // 阶段3持续时间，用于稳定车身
-                            if (g_is_returning_to_lane) {
-                                // 如果"回归"阶段已完成，则整个变道动作结束
-                                g_lane_change_state = LANE_CHANGE_NONE;
-                                g_is_returning_to_lane = false; // 重置标志
-                                flag_turn_done = 1;
-                                is_parking_phase = true;
-                                cout << "[变道] 完成回归，整个变道动作结束，开始寻找A/B车库" << endl;
-                            } else {
-                                // 如果"变出去"阶段已完成，则立即开始"回归"
-                                g_is_returning_to_lane = true;
-                                g_lane_change_direction = (g_lane_change_direction == 1) ? 2 : 1; // 方向反转
-                                g_lane_change_state = START_TURN; // 重启状态机
-                                g_lane_change_timer = std::chrono::steady_clock::now();
-                                cout << "[变道] 已进入邻道，开始回归原车道..." << endl;
-                            }
-                        }
-                    }
-                }
-
+                // 状态4: 寻找并进入车库
+                Tracking(bin_image); // 继续基础巡线以保持姿态
+                
                 result_ab.clear();
-                result_ab = fastestdet_ab->detect(frame); // 检测A/B
+                result_ab = fastestdet_ab->detect(frame); // 使用FastestDet模型检测A/B
 
-                // 新增：筛选出底部在巡线区域下方的有效目标
-                std::vector<DetectObject> valid_targets;
-                for (const auto& box : result_ab) {
-                    if ((box.rect.y + box.rect.height) > LINE_ROI_TOP_Y) {
-                        valid_targets.push_back(box);
-                    }
-                }
-
-                if (!valid_targets.empty())
+                DetectObject closest_box = {cv::Rect_<float>(0, 0, 0, 0), -1, 0.0f};
+                
+                if (!result_ab.empty())
                 {
-                    is_following_park_target = true; // 看到了有效目标，切换到跟随模式
-
-                    // 从有效目标中找到y2最大的那个检测框，即离得最近的
-                    DetectObject closest_box = valid_targets[0];
-                    for(size_t i = 1; i < valid_targets.size(); ++i) {
-                        if ((valid_targets[i].rect.y + valid_targets[i].rect.height) > (closest_box.rect.y + closest_box.rect.height)) {
-                            closest_box = valid_targets[i];
+                    // 找到y2最大的那个检测框，即离得最近的
+                    for(const auto& box : result_ab) {
+                        float box_y2 = box.rect.y + box.rect.height;
+                        float closest_y2 = closest_box.rect.y + closest_box.rect.height;
+                        if (box_y2 > closest_y2) {
+                            closest_box = box;
                         }
-                    }
-                    
-                    // 更新要对准的目标中心点，供servo_pd_AB()使用
-                    park_mid = closest_box.rect.x + closest_box.rect.width / 2;
-
-                    // 根据最近目标的标签，累加计数器
-                    if (closest_box.label == 0) { // 0 for A
-                        count_park_A++;
-                        cout << "[停车] 跟随目标: A (A计数:" << count_park_A << ", B计数:" << count_park_B << ")" << endl;
-                    } else { // 1 for B
-                        count_park_B++;
-                        cout << "[停车] 跟随目标: B (A计数:" << count_park_A << ", B计数:" << count_park_B << ")" << endl;
                     }
                     
                     float closest_y2 = closest_box.rect.y + closest_box.rect.height;
-                    cout << "[停车] 最近目标底部: " << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD << endl;
+                    latest_park_id = closest_box.label + 1; // 0 for A -> 1, 1 for B -> 2
+                    cout << "[停车] 检测到最近车库: " << (latest_park_id == 1 ? "A" : "B") 
+                         << "，底部位置: " << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD << endl;
 
                     // 检查是否达到入库阈值
                     if (closest_y2 >= PARKING_Y_THRESHOLD) {
-                        int final_park_target = (count_park_A > count_park_B) ? 1 : 2; // 1 for A, 2 for B
-                        cout << "[停车] 达到入库阈值！最终选择 -> " << (final_park_target == 1 ? "A" : "B") 
-                             << " (计数 A:" << count_park_A << ", B:" << count_park_B << ")" << endl;
-
-                        gohead(final_park_target);
-                        is_parking_phase = false; // 停车动作完成，退出停车阶段
+                        cout << "[停车] 已达到入库阈值，执行入库 -> " << (latest_park_id == 1 ? "A" : "B") << endl;
+                        gohead(latest_park_id);
+                        is_parking_phase = false; // 避免重复执行
                     }
-                }
-                else 
-                {
-                    // 视野中没有A/B目标，切换回常规巡线模式
-                    is_following_park_target = false;
-                    cout << "[停车] 未检测到A/B目标，执行常规巡线" << endl;
                 }
             }
             else if (is_in_avoidance)
@@ -1343,42 +1232,31 @@ int main(int argc, char* argv[])
                 
                 bz_get = 0;
                 result = fastestdet_obs->detect(frame);
-                
-                // 筛选出最近的、需要避让的蓝色锥桶
-                DetectObject closest_blue_obs = {cv::Rect_<float>(0,0,0,0), -1, 0.0f};
-                bool blue_obs_found = false;
-                for (const auto& box : result) {
-                    // label 0 is "blue"
-                    if (box.label == 0 && (box.rect.y + box.rect.height) > (closest_blue_obs.rect.y + closest_blue_obs.rect.height)) {
-                        closest_blue_obs = box;
-                        blue_obs_found = true;
-                    }
-                }
-
-                if (blue_obs_found) {
-                    int box_y2 = static_cast<int>(closest_blue_obs.rect.y + closest_blue_obs.rect.height);
-                    // 新逻辑：障碍物底部仍在巡线ROI内，则更新其位置
-                    if (box_y2 > LINE_ROI_TOP_Y) {
+                if (!result.empty()) {
+                    DetectObject box = result.at(0);
+                    int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
+                    if (box_y2 < bz_y2) {
                         bz_get = 1;
-                        // 更新最后一次看到的障碍物所有位置信息
-                        last_known_bz_x1 = static_cast<int>(closest_blue_obs.rect.x);
-                        last_known_bz_x2 = static_cast<int>(closest_blue_obs.rect.x + closest_blue_obs.rect.width);
-                        last_known_bz_xcenter = (last_known_bz_x1 + last_known_bz_x2) / 2;
+                        int box_x1 = static_cast<int>(box.rect.x);
+                        int box_x2 = static_cast<int>(box.rect.x + box.rect.width);
+                        int box_y1 = static_cast<int>(box.rect.y);
+                        last_known_bz_xcenter = (box_x1 + box_x2) / 2;
+                        last_known_bz_bottom = box_y2;
+                        last_known_bz_heighest = box_y1;
                         bz_disappear_count = 0; // 障碍物可见，重置消失计数
                     }
                 }
 
                 if (bz_get == 0) {
-                    bz_disappear_count++; // 蓝色障碍物不可见或太远，累加消失计数
+                    bz_disappear_count++; // 障碍物不可见，累加消失计数
                 }
 
                 // 只要在避障状态，就始终使用最后记录的位置进行补线
+                bz_heighest = last_known_bz_heighest; // 确保Tracking_bz使用正确的边界
                 if (last_known_bz_xcenter > 160) {
-                    // 障碍物在右，从左边界规划路径
-                    bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x1, LINE_ROI_TOP_Y), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), LINE_ROI_BOTTOM_Y + 2), 8);
+                    bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_xcenter, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
                 } else {
-                    // 障碍物在左，从右边界规划路径
-                    bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x2, LINE_ROI_TOP_Y), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), LINE_ROI_BOTTOM_Y + 2), 8);
+                    bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_xcenter, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
                 }
                 Tracking_bz(bin_image);
 
@@ -1395,12 +1273,10 @@ int main(int argc, char* argv[])
                 // 状态0/1: 默认巡航状态 (寻找障碍物或斑马线)
                 Tracking(bin_image); // 识别常规车道线
 
-                if (count_bz >= 1 && flag_turn_done == 0 && g_lane_change_state == LANE_CHANGE_NONE)
+                if (count_bz >= 1 && flag_turn_done == 0)
                 {
                     // 状态1: 已完成至少一次避障，且尚未完成转向，此时寻找斑马线
                     banma = banma_get(frame);
-                    is_zebra_visible = (banma == 1); // 更新斑马线可见状态
-
                     if (banma == 1) {
                         is_stopping_at_zebra = true; //切换到停车状态
                         has_detected_turn_sign = false; // 重置转向标识检测标志
@@ -1408,8 +1284,7 @@ int main(int argc, char* argv[])
                         zebra_stop_start_time = std::chrono::steady_clock::now();
                         cout << "[流程] 避障结束，检测到斑马线，准备停车识别" << endl;
                         banma_stop(); // 执行停车
-                        // 使用 & 让语音播报在后台进行，不阻塞3秒停车计时
-                        system("mpg123 /home/pi/dev_ws/月半猫.mp3 &"); 
+                        system("mpg123 /home/pi/dev_ws/月半猫.mp3"); // 播放斑马线提示音
                     }
                 }
                 else
@@ -1418,52 +1293,31 @@ int main(int argc, char* argv[])
                     bz_get = 0;
                     result = fastestdet_obs->detect(frame); 
 
-                    // 筛选出最近的、需要避让的蓝色锥桶
-                    DetectObject closest_blue_obs = {cv::Rect_<float>(0,0,0,0), -1, 0.0f};
-                    bool blue_obs_found = false;
-                    for (const auto& box : result) {
-                        // label 0 is "blue"
-                        if (box.label == 0 && (box.rect.y + box.rect.height) > (closest_blue_obs.rect.y + closest_blue_obs.rect.height)) {
-                            closest_blue_obs = box;
-                            blue_obs_found = true;
-                        }
-                    }
-
-                    bool is_valid_obs_detected = false;
-                    if (blue_obs_found) {
-                        int box_y2 = static_cast<int>(closest_blue_obs.rect.y + closest_blue_obs.rect.height);
-                        if (box_y2 > LINE_ROI_TOP_Y) {
-                            is_valid_obs_detected = true;
-                        }
-                    }
-
-                    if (is_valid_obs_detected) {
-                        bz_detect_count++;
-                        cout << "[检测] 发现有效障碍物，计数: " << bz_detect_count << "/" << BZ_DETECT_THRESHOLD << endl;
-
-                        if(bz_detect_count >= BZ_DETECT_THRESHOLD && !is_in_avoidance) {
+                    if (result.size() > 0) { 
+                        DetectObject box = result.at(0);
+                        int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
+                        if (box_y2 < bz_y2) { 
                             bz_get = 1; 
                             is_in_avoidance = true; // 启动并锁定避障状态
-                            cout << "[流程] 连续检测到蓝色障碍物，进入避障模式" << endl;
+                            cout << "[流程] 检测到障碍物，进入避障模式" << endl;
                             
                             // 记录障碍物的初始位置
-                            last_known_bz_x1 = static_cast<int>(closest_blue_obs.rect.x);
-                            last_known_bz_x2 = static_cast<int>(closest_blue_obs.rect.x + closest_blue_obs.rect.width);
-                            last_known_bz_xcenter = (last_known_bz_x1 + last_known_bz_x2) / 2;
+                            int box_x1 = static_cast<int>(box.rect.x);
+                            int box_x2 = static_cast<int>(box.rect.x + box.rect.width);
+                            int box_y1 = static_cast<int>(box.rect.y);
+                            last_known_bz_xcenter = (box_x1 + box_x2) / 2;
+                            last_known_bz_bottom = box_y2;
+                            last_known_bz_heighest = box_y1;
+                            bz_heighest = last_known_bz_heighest;
 
                             // 立即执行第一次补线和避障巡线
                             if (last_known_bz_xcenter > 160) { 
-                                bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x1, LINE_ROI_TOP_Y), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), LINE_ROI_BOTTOM_Y + 2), 8);
+                                bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_xcenter, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
                             } else { 
-                                bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x2, LINE_ROI_TOP_Y), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), LINE_ROI_BOTTOM_Y + 2), 8);
+                                bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_xcenter, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
                             }
-                            Tracking_bz(bin_image);
+                            Tracking_bz(bin_image); 
                         }
-                    } else {
-                        if (bz_detect_count > 0) {
-                            cout << "[检测] 有效障碍物消失，重置计数" << endl;
-                        }
-                        bz_detect_count = 0;
                     }
                 }
             }
@@ -1495,7 +1349,7 @@ int main(int argc, char* argv[])
         } catch (...) {
             cerr << "[错误] 未知异常，跳过当前帧" << endl;
             // 继续下一帧
-            continue;
+continue;
         }
 
     }
