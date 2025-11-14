@@ -32,7 +32,7 @@ const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，�
 
 //---------------性能统计---------------------------------------------------
 int number = 0; // 已处理帧计数
-bool SHOW_FPS = false; // 是否显示FPS信息，可通过命令行参数控制
+bool SHOW_FPS = true; // 是否显示FPS信息，可通过命令行参数控制
 
 //------------有关的全局变量定义------------------------------------------------------------------------------------------
 
@@ -161,7 +161,7 @@ const float yuntai_UD_pwm_duty_cycle_unlock = 58.0; //大上下小
 //---------------平滑滤波相关-------------------------------------------------
 std::vector<cv::Point> last_mid; // 存储上一次的中线，用于平滑滤波
 int blue_detect_count = 0; // 蓝色挡板连续检测计数
-const int BLUE_DETECT_THRESHOLD = 10; // 需要连续检测到的帧数才能确认找到蓝色挡板
+const int BLUE_DETECT_THRESHOLD = 5; // 需要连续检测到的帧数才能确认找到蓝色挡板
 
 //---------------蓝色检测参数------------------------------------------
 // HSV颜色范围
@@ -333,7 +333,7 @@ cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr)
     }
     else
     {
-        resizedFrame = frame.clone();
+        resizedFrame = frame; // 无需克隆，后续操作不会修改原始frame
     }
 
     const cv::Rect roiRect(1, 109, 318, 46); // 巡线ROI区域
@@ -347,41 +347,47 @@ cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr)
     cv::blur(grayRoi, blurredRoi, cv::Size(kernelSize, kernelSize)); // ROI均值滤波降噪
 
     cv::Mat sobelX, sobelY;
-    cv::Sobel(blurredRoi, sobelX, CV_64F, 1, 0, 3); // X方向梯度
-    cv::Sobel(blurredRoi, sobelY, CV_64F, 0, 1, 3); // Y方向梯度
-    cv::Mat gradientMagnitude = cv::abs(sobelY) + 0.5 * cv::abs(sobelX); // 组合梯度更偏向纵向
+    // 使用CV_16S以提高性能，避免使用昂贵的CV_64F浮点运算
+    cv::Sobel(blurredRoi, sobelX, CV_16S, 1, 0, 3);
+    cv::Sobel(blurredRoi, sobelY, CV_16S, 0, 1, 3);
+
+    // 转换回CV_8U并计算梯度
+    cv::Mat absSobelX, absSobelY;
+    cv::convertScaleAbs(sobelX, absSobelX);
+    cv::convertScaleAbs(sobelY, absSobelY);
+    
+    // 组合梯度，权重偏向Y方向
     cv::Mat gradientMagnitude8U;
-    cv::convertScaleAbs(gradientMagnitude, gradientMagnitude8U); // 转为8位方便阈值
+    cv::addWeighted(absSobelY, 1.0, absSobelX, 0.5, 0, gradientMagnitude8U);
 
     // 顶帽操作减弱阴影
     cv::Mat topHat;
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(20, 3));
-    cv::morphologyEx(blurredRoi, topHat, cv::MORPH_TOPHAT, kernel);
+    static cv::Mat kernel_tophat = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(20, 3));
+    cv::morphologyEx(blurredRoi, topHat, cv::MORPH_TOPHAT, kernel_tophat);
 
     cv::Mat adaptiveMask;
     cv::threshold(topHat, adaptiveMask, 5, 255, cv::THRESH_BINARY);
 
     cv::Mat gradientMask;
     cv::threshold(gradientMagnitude8U, gradientMask, 15, 255, cv::THRESH_BINARY); // 梯度二值掩码
-    cv::Mat gradientKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-    cv::dilate(gradientMask, gradientMask, gradientKernel);
+    static cv::Mat kernel_gradient_dilate = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    cv::dilate(gradientMask, gradientMask, kernel_gradient_dilate);
 
     cv::Mat binaryMask;
     cv::bitwise_and(adaptiveMask, gradientMask, binaryMask); // 亮度+梯度联合约束
 
     cv::medianBlur(binaryMask, binaryMask, 3); // 中值去椒盐噪声
-    cv::Mat noiseKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 1));
-    cv::morphologyEx(binaryMask, binaryMask, cv::MORPH_OPEN, noiseKernel); // 小结构开运算
+    // cv::morphologyEx(binaryMask, binaryMask, cv::MORPH_OPEN, noiseKernel); // 小结构开运算 - 1x1内核无效，已移除
 
-    cv::Mat morphImage = binaryMask.clone();
-    cv::Mat kernelClose = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(9, 5)); // 闭运算连接断裂
-    cv::morphologyEx(morphImage, morphImage, cv::MORPH_CLOSE, kernelClose);
-    cv::Mat kernelDilate = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)); // 膨胀加粗车道线
-    cv::dilate(morphImage, morphImage, kernelDilate, cv::Point(-1, -1), 1);
+    // 原地执行形态学操作，避免binaryMask.clone()的开销
+    static cv::Mat kernel_close = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(9, 5)); // 闭运算连接断裂
+    cv::morphologyEx(binaryMask, binaryMask, cv::MORPH_CLOSE, kernel_close);
+    static cv::Mat kernel_dilate = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)); // 膨胀加粗车道线
+    cv::dilate(binaryMask, binaryMask, kernel_dilate, cv::Point(-1, -1), 1);
 
     cv::Mat labels, stats, centroids;
-    int numLabels = cv::connectedComponentsWithStats(morphImage, labels, stats, centroids, 8, CV_32S); // 连通域分析
-    cv::Mat filteredMorph = cv::Mat::zeros(morphImage.size(), CV_8U);
+    int numLabels = cv::connectedComponentsWithStats(binaryMask, labels, stats, centroids, 8, CV_32S); // 连通域分析
+    cv::Mat filteredMorph = cv::Mat::zeros(binaryMask.size(), CV_8U);
     for (int i = 1; i < numLabels; ++i)
     {
         if (stats.at<int>(i, cv::CC_STAT_AREA) >= MIN_COMPONENT_AREA)
@@ -389,10 +395,9 @@ cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr)
             filteredMorph.setTo(255, labels == i);
         }
     }
-    morphImage = filteredMorph;
 
     std::vector<cv::Vec4i> lines;
-    cv::HoughLinesP(morphImage, lines, 1, CV_PI / 180, 20, 15, 8);
+    cv::HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 20, 15, 8);
 
     cv::Mat finalImage = cv::Mat::zeros(targetSize, CV_8U);
     cv::Mat overlayImage;

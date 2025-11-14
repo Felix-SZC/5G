@@ -64,11 +64,19 @@ int main(int argc, char** argv) {
     
     // Sobel边缘检测
     Mat sobelX, sobelY;
-    Sobel(blurredRoi, sobelX, CV_64F, 1, 0, 3); // x方向梯度
-    Sobel(blurredRoi, sobelY, CV_64F, 0, 1, 3); // y方向梯度
-    Mat gradientMagnitude = cv::abs(sobelY + sobelX * 0.5); // x方向权重减半
+    // 使用CV_16S以提高性能，避免使用昂贵的CV_64F浮点运算
+    Sobel(blurredRoi, sobelX, CV_16S, 1, 0, 3);
+    Sobel(blurredRoi, sobelY, CV_16S, 0, 1, 3);
+
+    // 转换回CV_8U并计算梯度
+    Mat absSobelX, absSobelY;
+    convertScaleAbs(sobelX, absSobelX);
+    convertScaleAbs(sobelY, absSobelY);
+
+    // 组合梯度，权重偏向Y方向
     Mat gradientMagnitude8u;
-    convertScaleAbs(gradientMagnitude, gradientMagnitude8u);
+    addWeighted(absSobelY, 1.0, absSobelX, 0.5, 0, gradientMagnitude8u);
+
     imshow("5. Sobel Gradient ROI", gradientMagnitude8u);
     cout << "按任意键继续..." << endl;
     waitKey(0);
@@ -99,37 +107,35 @@ int main(int argc, char** argv) {
     bitwise_and(adaptiveMask, gradientMask, binaryMask);
     medianBlur(binaryMask, binaryMask, 3);
 
-    Mat noiseKernel = getStructuringElement(MORPH_RECT, Size(1, 1));
-    morphologyEx(binaryMask, binaryMask, MORPH_OPEN, noiseKernel);
+    // Mat noiseKernel = getStructuringElement(MORPH_RECT, Size(1, 1));
+    // morphologyEx(binaryMask, binaryMask, MORPH_OPEN, noiseKernel);
 
     imshow("9. Binary Mask ROI", binaryMask);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
-    // 形态学操作
-    Mat morphImage = binaryMask.clone();
-    Mat kernelClose = getStructuringElement(MORPH_RECT, Size(9, 5));
-    morphologyEx(morphImage, morphImage, MORPH_CLOSE, kernelClose);
-    Mat kernelDilate = getStructuringElement(MORPH_RECT, Size(5, 5));
-    dilate(morphImage, morphImage, kernelDilate, Point(-1, -1), 1);
+    // 形态学操作 (原地，无克隆)
+    static cv::Mat kernel_close = getStructuringElement(MORPH_RECT, Size(9, 5));
+    morphologyEx(binaryMask, binaryMask, MORPH_CLOSE, kernel_close);
+    static cv::Mat kernel_dilate = getStructuringElement(MORPH_RECT, Size(5, 5));
+    dilate(binaryMask, binaryMask, kernel_dilate, Point(-1, -1), 1);
 
     Mat labels, stats, centroids;
-    int numLabels = connectedComponentsWithStats(morphImage, labels, stats, centroids, 8, CV_32S);
-    Mat filteredMorph = Mat::zeros(morphImage.size(), CV_8U);
+    int numLabels = connectedComponentsWithStats(binaryMask, labels, stats, centroids, 8, CV_32S);
+    Mat filteredMorph = Mat::zeros(binaryMask.size(), CV_8U);
     for (int i = 1; i < numLabels; ++i) {
         if (stats.at<int>(i, CC_STAT_AREA) >= MIN_COMPONENT_AREA) {
             filteredMorph.setTo(255, labels == i);
         }
     }
-    morphImage = filteredMorph;
 
-    imshow("10. Morphed ROI", morphImage);
+    imshow("10. Morphed ROI", filteredMorph);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
     // Hough直线检测
     vector<Vec4i> lines;
-    HoughLinesP(morphImage, lines, 1, CV_PI / 180, 20, 15, 8);
+    HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 20, 15, 8);
     cout << "检测到 " << lines.size() << " 条直线" << endl;
 
     // 在原图上绘制结果
