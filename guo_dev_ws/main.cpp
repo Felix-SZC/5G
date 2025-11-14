@@ -23,8 +23,8 @@ bool program_finished = false; // 控制主循环退出的标志
 
 //------------速度参数配置------------------------------------------------------------------------------------------
 const int MOTOR_SPEED_DELTA_CRUISE = 1300; // 常规巡航速度增量
-const int MOTOR_SPEED_DELTA_AVOID = 1300;  // 避障阶段速度增量
-const int MOTOR_SPEED_DELTA_PARK = 1300;   // 车库阶段速度增量
+const int MOTOR_SPEED_DELTA_AVOID = 900;  // 避障阶段速度增量
+const int MOTOR_SPEED_DELTA_PARK = 1000;   // 车库阶段速度增量
 
 //---------------调试选项-------------------------------------------------
 const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
@@ -125,6 +125,9 @@ int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
 int park_A_count = 0; // A车库累计识别次数
 int park_B_count = 0; // B车库累计识别次数
 const int PARKING_Y_THRESHOLD = 200; // 触发入库的Y轴阈值
+bool is_in_final_parking = false; // 是否处于最终入库冲刺阶段
+std::chrono::steady_clock::time_point final_parking_start_time; // 最终入库开始时间
+int final_parking_target_side = 0; // 最终入库目标：1 for A (left), 2 for B (right)
 
 // 定义舵机和电机引脚号、PWM范围、PWM频率、PWM占空比解锁值
 const int servo_pin = 12; // 存储舵机引脚号
@@ -813,7 +816,7 @@ int banma_get(cv::Mat &frame) {
 
     // 4. 二值化
     cv::Mat binaryMask;
-    cv::threshold(topHat, binaryMask, 50, 255, cv::THRESH_BINARY);
+    cv::threshold(topHat, binaryMask, 80, 255, cv::THRESH_BINARY);
 
     // 5. 形态学开运算（先腐蚀再膨胀），去除小的噪声点
     cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
@@ -938,6 +941,41 @@ float servo_pd_AB(int target) { // 避障巡线控制
     return servo_pwm; // 返回舵机PWM值
 }
 
+// 功能: 最终入库PD控制器，基于偏移的巡线
+float servo_pd_parking(int side) { // side: 1 for A (left), 2 for B (right)
+    // 安全检查：确保mid向量有足够的元素
+    if (mid.size() < 26) {
+        cerr << "[警告] servo_pd_parking: mid向量元素不足 (" << mid.size() << " < 26)，返回中值" << endl;
+        return servo_pwm_mid;
+    }
+
+    int pidx_raw = int((mid[23].x + mid[25].x) / 2); // 原始中线位置
+
+    const int PARKING_OFFSET = 30; // 可调参数：入库偏移量
+    int pidx_final;
+
+    if (side == 1) { // A库，左边
+        pidx_final = pidx_raw - PARKING_OFFSET;
+    } else { // B库，右边
+        pidx_final = pidx_raw + PARKING_OFFSET;
+    }
+
+    float kp = 2.5; 
+    float kd = 5.0;
+
+    error_first = 160 - pidx_final; // 目标是屏幕中心 160
+
+    servo_pwm_diff = kp * error_first + kd * (error_first - last_error);
+    last_error = error_first;
+    servo_pwm = servo_pwm_mid + servo_pwm_diff;
+
+    // 限制PWM范围
+    if (servo_pwm > 1000) servo_pwm = 1000;
+    else if (servo_pwm < 580) servo_pwm = 580;
+
+    return servo_pwm;
+}
+
 
 // 功能: 根据最近识别的车库ID（A=1/B=2）执行入库动作序列
 void gohead(int parkchose){
@@ -1017,12 +1055,18 @@ void motor_servo_contral()
         return;
     }
 
-    if (is_parking_phase)
+    if (is_in_final_parking)
+    {
+        // 状态5: 最终入库
+        servo_pwm_now = servo_pd_parking(final_parking_target_side);
+        gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK); // 使用入库速度
+    }
+    else if (is_parking_phase)
     {
         // 状态4: 寻找并进入车库
         if (latest_park_id != 0) {
             // 已识别到车库，切换到车库PD控制
-            servo_pwm_now = servo_pd_AB(160); 
+            servo_pwm_now = servo_pd(160); 
             gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
         } else {
             // 未识别到车库，继续常规巡线
@@ -1060,7 +1104,7 @@ int main(int argc, char* argv[])
     // 初始化检测模型
     cout << "[初始化] 加载障碍物检测模型..." << endl;
     try {
-        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.6f, 0.4f, 4, false);
+        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.4f, 0.4f, 4, false);
         cout << "[初始化] 障碍物检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 障碍物检测模型加载失败: " << e.what() << endl;
@@ -1079,7 +1123,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载车库检测模型..." << endl;
     try {
-        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.6f, 0.5f, 4, false);
+        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.4f, 0.5f, 4, false);
         cout << "[初始化] 车库检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 车库检测模型加载失败: " << e.what() << endl;
@@ -1217,6 +1261,23 @@ int main(int argc, char* argv[])
                     cout << "[流程] 1.5秒巡线结束，开始寻找并识别A/B车库" << endl;
                 }
             }
+            else if (is_in_final_parking)
+            {
+                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - final_parking_start_time).count();
+                if (elapsed_ms >= 1000) {
+                    cout << "[流程] 1秒入库完成，停车" << endl;
+                    // 明确地发送停车指令
+                    gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock - 3000); // 确保刹车
+                    usleep(100000); // 短暂延时以确保指令执行
+                    gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock); // 停车
+                    gpioPWM(servo_pin, servo_pwm_mid); // 舵机回中
+                    program_finished = true; // 结束程序
+                    continue; // 跳过本轮的motor_servo_contral
+                } else {
+                    // 时间未到，需要进行巡线计算
+                    Tracking(bin_image);
+                }
+            }
             else if (is_parking_phase)
             {
                 // 状态4: 寻找并进入车库
@@ -1229,50 +1290,66 @@ int main(int argc, char* argv[])
                 
                 if (!result_ab.empty())
                 {
-                    // 1. 找到y2最大的那个检测框，即离得最近的
+                    // 1. 找到y2最大的那个检测框（离得最近），且其底部满足阈值要求
                     for(const auto& box : result_ab) {
                         float box_y2 = box.rect.y + box.rect.height;
+                        // 寻找到的AB底部需要大于障碍物阈值才算有效
+                        if (box_y2 > BZ_Y_LOWER_THRESHOLD) {
+                            float closest_y2 = closest_box.rect.y + closest_box.rect.height;
+                            if (box_y2 > closest_y2) {
+                                closest_box = box;
+                            }
+                        }
+                    }
+                    
+                    // 如果经过筛选后，找到了有效的车库目标
+                    if (closest_box.label != -1)
+                    {
+                        // 2. 仅以最近的为准，累加A和B的计数
+                        if (closest_box.label == 0) { // 'A'
+                            park_A_count++;
+                        } else if (closest_box.label == 1) { // 'B'
+                            park_B_count++;
+                        }
+
+                        park_mid = closest_box.rect.x + closest_box.rect.width / 2; // 更新车库中心点
                         float closest_y2 = closest_box.rect.y + closest_box.rect.height;
-                        if (box_y2 > closest_y2) {
-                            closest_box = box;
+                        latest_park_id = closest_box.label + 1; // 0 for A -> 1, 1 for B -> 2
+                        
+                        cout << "[停车] 最近: " << (latest_park_id == 1 ? "A" : "B") 
+                             << " | 计数 A:" << park_A_count << ", B:" << park_B_count
+                             << " | Y:" << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD << endl;
+
+                        // 检查是否达到入库阈值
+                        if (closest_y2 >= PARKING_Y_THRESHOLD) {
+                            int park_target = 0;
+                            if (park_A_count > park_B_count) {
+                                park_target = 1; // Park in A
+                                cout << "[停车决策] A计数更多 (" << park_A_count << " vs " << park_B_count << ")，选择A车库" << endl;
+                            } else if (park_B_count > park_A_count) {
+                                park_target = 2; // Park in B
+                                cout << "[停车决策] B计数更多 (" << park_B_count << " vs " << park_A_count << ")，选择B车库" << endl;
+                            } else {
+                                // Counts are equal or both zero, default to the closest one
+                                park_target = latest_park_id;
+                                cout << "[停车决策] A/B计数相同，选择最近的车库: " << (park_target == 1 ? "A" : "B") << endl;
+                            }
+
+                            if (park_target != 0) {
+                                //  gohead(park_target);
+                                //  is_parking_phase = false; // 避免重复执行
+                                //  program_finished = true; // 设置退出标志
+                                 is_parking_phase = false; // 切换到最终入库状态
+                                 is_in_final_parking = true;
+                                 final_parking_start_time = std::chrono::steady_clock::now();
+                                 final_parking_target_side = park_target;
+                                 cout << "[流程] 达到入库阈值，开始 " << (park_target == 1 ? "A" : "B") << " 库的最终入库程序" << endl;
+                            }
                         }
                     }
-                    
-                    // 2. 仅以最近的为准，累加A和B的计数
-                    if (closest_box.label == 0) { // 'A'
-                        park_A_count++;
-                    } else if (closest_box.label == 1) { // 'B'
-                        park_B_count++;
-                    }
-
-                    park_mid = closest_box.rect.x + closest_box.rect.width / 2; // 更新车库中心点
-                    float closest_y2 = closest_box.rect.y + closest_box.rect.height;
-                    latest_park_id = closest_box.label + 1; // 0 for A -> 1, 1 for B -> 2
-                    
-                    cout << "[停车] 最近: " << (latest_park_id == 1 ? "A" : "B") 
-                         << " | 计数 A:" << park_A_count << ", B:" << park_B_count
-                         << " | Y:" << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD << endl;
-
-                    // 检查是否达到入库阈值
-                    if (closest_y2 >= PARKING_Y_THRESHOLD) {
-                        int park_target = 0;
-                        if (park_A_count > park_B_count) {
-                            park_target = 1; // Park in A
-                            cout << "[停车决策] A计数更多 (" << park_A_count << " vs " << park_B_count << ")，选择A车库" << endl;
-                        } else if (park_B_count > park_A_count) {
-                            park_target = 2; // Park in B
-                            cout << "[停车决策] B计数更多 (" << park_B_count << " vs " << park_A_count << ")，选择B车库" << endl;
-                        } else {
-                            // Counts are equal or both zero, default to the closest one
-                            park_target = latest_park_id;
-                            cout << "[停车决策] A/B计数相同，选择最近的车库: " << (park_target == 1 ? "A" : "B") << endl;
-                        }
-
-                        if (park_target != 0) {
-                             gohead(park_target);
-                             is_parking_phase = false; // 避免重复执行
-                             program_finished = true; // 设置退出标志
-                        }
+                    else 
+                    {
+                        latest_park_id = 0; // 未检测到有效目标，重置
                     }
                 }
                 else
