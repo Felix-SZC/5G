@@ -122,6 +122,8 @@ std::chrono::steady_clock::time_point post_zebra_delay_start_time; // Timer for 
 bool is_in_post_zebra_delay = false; // Flag for delay state after zebra crossing
 bool is_parking_phase = false; // 是否进入寻找车库阶段
 int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
+int park_A_count = 0; // A车库累计识别次数
+int park_B_count = 0; // B车库累计识别次数
 const int PARKING_Y_THRESHOLD = 200; // 触发入库的Y轴阈值
 
 // 定义舵机和电机引脚号、PWM范围、PWM频率、PWM占空比解锁值
@@ -1227,7 +1229,7 @@ int main(int argc, char* argv[])
                 
                 if (!result_ab.empty())
                 {
-                    // 找到y2最大的那个检测框，即离得最近的
+                    // 1. 找到y2最大的那个检测框，即离得最近的
                     for(const auto& box : result_ab) {
                         float box_y2 = box.rect.y + box.rect.height;
                         float closest_y2 = closest_box.rect.y + closest_box.rect.height;
@@ -1236,18 +1238,41 @@ int main(int argc, char* argv[])
                         }
                     }
                     
+                    // 2. 仅以最近的为准，累加A和B的计数
+                    if (closest_box.label == 0) { // 'A'
+                        park_A_count++;
+                    } else if (closest_box.label == 1) { // 'B'
+                        park_B_count++;
+                    }
+
                     park_mid = closest_box.rect.x + closest_box.rect.width / 2; // 更新车库中心点
                     float closest_y2 = closest_box.rect.y + closest_box.rect.height;
                     latest_park_id = closest_box.label + 1; // 0 for A -> 1, 1 for B -> 2
-                    cout << "[停车] 检测到最近车库: " << (latest_park_id == 1 ? "A" : "B") 
-                         << "，底部位置: " << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD << endl;
+                    
+                    cout << "[停车] 最近: " << (latest_park_id == 1 ? "A" : "B") 
+                         << " | 计数 A:" << park_A_count << ", B:" << park_B_count
+                         << " | Y:" << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD << endl;
 
                     // 检查是否达到入库阈值
                     if (closest_y2 >= PARKING_Y_THRESHOLD) {
-                        cout << "[停车] 已达到入库阈值，执行入库 -> " << (latest_park_id == 1 ? "A" : "B") << endl;
-                        gohead(latest_park_id);
-                        is_parking_phase = false; // 避免重复执行
-                        program_finished = true; // 设置退出标志
+                        int park_target = 0;
+                        if (park_A_count > park_B_count) {
+                            park_target = 1; // Park in A
+                            cout << "[停车决策] A计数更多 (" << park_A_count << " vs " << park_B_count << ")，选择A车库" << endl;
+                        } else if (park_B_count > park_A_count) {
+                            park_target = 2; // Park in B
+                            cout << "[停车决策] B计数更多 (" << park_B_count << " vs " << park_A_count << ")，选择B车库" << endl;
+                        } else {
+                            // Counts are equal or both zero, default to the closest one
+                            park_target = latest_park_id;
+                            cout << "[停车决策] A/B计数相同，选择最近的车库: " << (park_target == 1 ? "A" : "B") << endl;
+                        }
+
+                        if (park_target != 0) {
+                             gohead(park_target);
+                             is_parking_phase = false; // 避免重复执行
+                             program_finished = true; // 设置退出标志
+                        }
                     }
                 }
                 else
