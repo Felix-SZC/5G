@@ -23,8 +23,8 @@ bool program_finished = false; // 控制主循环退出的标志
 
 //------------速度参数配置------------------------------------------------------------------------------------------
 const int MOTOR_SPEED_DELTA_CRUISE = 1300; // 常规巡航速度增量
-const int MOTOR_SPEED_DELTA_AVOID = 900;  // 避障阶段速度增量
-const int MOTOR_SPEED_DELTA_PARK = 1000;   // 车库阶段速度增量
+const int MOTOR_SPEED_DELTA_AVOID = 1100;  // 避障阶段速度增量
+const int MOTOR_SPEED_DELTA_PARK = 900;   // 车库阶段速度增量
 
 //---------------调试选项-------------------------------------------------
 const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
@@ -32,7 +32,7 @@ const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，�
 
 //---------------性能统计---------------------------------------------------
 int number = 0; // 已处理帧计数
-bool SHOW_FPS = true; // 是否显示FPS信息，可通过命令行参数控制
+bool SHOW_FPS = false; // 是否显示FPS信息，可通过命令行参数控制
 
 //------------有关的全局变量定义------------------------------------------------------------------------------------------
 
@@ -105,12 +105,12 @@ int last_known_bz_bottom = 0;
 int last_known_bz_heighest = 0;
 int count_bz = 0; // 避障计数器
 int bz_disappear_count = 0; // 障碍物连续消失计数
-const int BZ_DISAPPEAR_THRESHOLD = 5; // 确认障碍物消失的帧数阈值
+const int BZ_DISAPPEAR_THRESHOLD = 3; // 确认障碍物消失的帧数阈值
 const int BZ_Y_UPPER_THRESHOLD = 170; // 可见障碍物底部阈值 (上限)
-const int BZ_Y_LOWER_THRESHOLD = 90; // 触发避障的Y轴下限阈值 (下限)
+const int BZ_Y_LOWER_THRESHOLD = 40; // 触发避障的Y轴下限阈值 (下限)
 
 int bz_detect_count = 0; // 障碍物连续检测计数
-const int BZ_DETECT_THRESHOLD = 3; // 确认障碍物出现的帧数阈值
+const int BZ_DETECT_THRESHOLD = 2; // 确认障碍物出现的帧数阈值
 
 //----------------停车相关---------------------------------------------------
 int park_mid = 160; // 停车车库中线检测结果
@@ -124,7 +124,7 @@ bool is_parking_phase = false; // 是否进入寻找车库阶段
 int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
 int park_A_count = 0; // A车库累计识别次数
 int park_B_count = 0; // B车库累计识别次数
-const int PARKING_Y_THRESHOLD = 200; // 触发入库的Y轴阈值
+const int PARKING_Y_THRESHOLD = 150; // 触发入库的Y轴阈值
 bool is_in_final_parking = false; // 是否处于最终入库冲刺阶段
 std::chrono::steady_clock::time_point final_parking_start_time; // 最终入库开始时间
 int final_parking_target_side = 0; // 最终入库目标：1 for A (left), 2 for B (right)
@@ -173,7 +173,7 @@ const int BLUE_V_MIN = 50;   // 亮度V最小值
 const int BLUE_V_MAX = 255;  // 亮度V最大值
 
 // 蓝色检测ROI区域（限制检测范围）
-const int BLUE_ROI_X = 50;      // ROI左上角X坐标
+const int BLUE_ROI_X = 90;      // ROI左上角X坐标
 const int BLUE_ROI_Y = 80;      // ROI左上角Y坐标
 const int BLUE_ROI_WIDTH = 220;  // ROI宽度
 const int BLUE_ROI_HEIGHT = 100; // ROI高度
@@ -211,6 +211,17 @@ const int BANMA_MIN_COUNT = 4;
 // 形态学处理参数
 const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
 
+//---------------Yellow Garage Detection--------------------------------
+const int YELLOW_H_MIN = 22;
+const int YELLOW_H_MAX = 38;
+const int YELLOW_S_MIN = 100;
+const int YELLOW_S_MAX = 255;
+const int YELLOW_V_MIN = 80;
+const int YELLOW_V_MAX = 255;
+const double MIN_YELLOW_CONTOUR_AREA = 20.0;
+const int YELLOW_PARKING_OFFSET = 50; // 新增：入库时，目标点相对黄色竖线的偏移量
+
+int yellow_line_pidx = -1; // -1表示未找到黄色竖线
 
 //--------------------------------------------------------------------------
 
@@ -627,6 +638,58 @@ void Tracking_bz(cv::Mat &dilated_image)
     last_mid_bz = mid_bz;
 }
 
+// 功能: 在最终入库阶段，寻找黄色车库竖线作为引导
+int find_yellow_line_pidx(cv::Mat& frame) {
+    if (frame.empty()) {
+        return -1;
+    }
+
+    // 限制检测区域，调整到离车更近的图像下半部分
+    const cv::Rect roiRect(1, 60, 318, 150);
+    
+    // 安全检查，确保ROI在图像范围内
+    if (roiRect.x + roiRect.width > frame.cols || roiRect.y + roiRect.height > frame.rows) {
+        cerr << "[错误] find_yellow_line_pidx: ROI超出边界" << endl;
+        return -1;
+    }
+    cv::Mat roiFrame = frame(roiRect).clone();
+
+    cv::Mat hsv, mask;
+    cv::cvtColor(roiFrame, hsv, cv::COLOR_BGR2HSV);
+    cv::inRange(hsv, cv::Scalar(YELLOW_H_MIN, YELLOW_S_MIN, YELLOW_V_MIN),
+                     cv::Scalar(YELLOW_H_MAX, YELLOW_S_MAX, YELLOW_V_MAX), mask);
+
+    // 形态学操作，去除噪声
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel, cv::Point(-1,-1), 1);
+    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel, cv::Point(-1,-1), 1);
+
+    std::vector<cv::Vec4i> lines;
+    // 使用霍夫变换检测直线，进一步放宽参数
+    cv::HoughLinesP(mask, lines, 1, CV_PI / 180, 10, 8, 15);
+
+    double longest_length = 0;
+    int best_pidx = -1;
+
+    for (const auto &l : lines)
+    {
+        double angle = std::atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
+        double length = std::hypot(l[3] - l[1], l[2] - l[0]);
+
+        // 筛选垂直线 (角度在60到120度之间)，并满足最小长度
+        if (std::abs(std::abs(angle) - 90) < 30 && length > 8)
+        {
+            if (length > longest_length) {
+                longest_length = length;
+                // 使用线的中心点作为pidx，并转换为全图坐标
+                best_pidx = (l[0] + l[2]) / 2 + roiRect.x;
+            }
+        }
+    }
+    
+    return best_pidx;
+}
+
 // 比较两个轮廓的面积
 // 功能: 轮廓面积比较（用于排序，返回面积更大的在前）
 bool Contour_Area(const vector<Point>& contour1, const vector<Point>& contour2)
@@ -918,8 +981,8 @@ float servo_pd_AB(int target) { // 避障巡线控制
 
     int pidx = park_mid; // 计算中点的x坐标
 
-    float kp = 3.0; // 比例系数
-    float kd = 3.0; // 微分系数
+    float kp = 1.0; // 比例系数
+    float kd = 2.0; // 微分系数
 
     error_first = target - pidx; // 计算误差
 
@@ -941,35 +1004,40 @@ float servo_pd_AB(int target) { // 避障巡线控制
 
 // 功能: 最终入库PD控制器，基于偏移的巡线
 float servo_pd_parking(int side) { // side: 1 for A (left), 2 for B (right)
-    // 安全检查：确保mid向量有足够的元素
-    if (mid.size() < 26) {
-        cerr << "[警告] servo_pd_parking: mid向量元素不足 (" << mid.size() << " < 26)，返回中值" << endl;
-        return servo_pwm_mid;
+    int pidx_final; // PD控制器的目标跟踪点
+
+    if (yellow_line_pidx != -1) {
+        // 策略1: 检测到黄色竖线，基于竖线位置计算目标点
+        cout << "[停车] 检测到黄色竖线，位置: " << yellow_line_pidx << endl;
+        if (side == 1) { // A库在左，目标点在黄线右侧
+            pidx_final = yellow_line_pidx - YELLOW_PARKING_OFFSET;
+        } else { // B库在右，目标点在黄线左侧
+            pidx_final = yellow_line_pidx + YELLOW_PARKING_OFFSET;
+        }
+    } else {
+        // 策略2: 未检测到黄色竖线，回退到基于黑线偏移的传统方法
+        cerr << "[警告] servo_pd_parking: 未检测到黄色竖线，使用黑线偏移作为后备方案" << endl;
+        if (mid.size() < 26) {
+            cerr << "[警告] servo_pd_parking: mid向量元素不足 (" << mid.size() << " < 26)，返回中值" << endl;
+            return servo_pwm_mid;
+        }
+        int pidx_raw = int((mid[23].x + mid[25].x) / 2); // 原始中线位置
+        const int PARKING_OFFSET_fallback = 30; // 传统偏移量
+        if (side == 1) { // A库，左边
+            pidx_final = pidx_raw - PARKING_OFFSET_fallback;
+        } else { // B库，右边
+            pidx_final = pidx_raw + PARKING_OFFSET_fallback;
+        }
     }
 
-    int pidx_raw = int((mid[23].x + mid[25].x) / 2); // 原始中线位置
+    float kp = 1.0; 
+    float kd = 2.0;
 
-    const int PARKING_OFFSET = 30; // 可调参数：入库偏移量
-    int pidx_final;
-
-    if (side == 1) { // A库，左边
-        pidx_final = pidx_raw - PARKING_OFFSET;
-    } else { // B库，右边
-        pidx_final = pidx_raw + PARKING_OFFSET;
-    }
-
-    float kp = 2.5; 
-    float kd = 5.0;
-
-    error_first = 160 - pidx_final; // 目标是屏幕中心 160
+    error_first = 160 - pidx_final; // 目标是使pidx_final对准屏幕中心160
 
     servo_pwm_diff = kp * error_first + kd * (error_first - last_error);
     last_error = error_first;
     servo_pwm = servo_pwm_mid + servo_pwm_diff;
-
-    // 限制PWM范围
-    if (servo_pwm > 1000) servo_pwm = 1000;
-    else if (servo_pwm < 580) servo_pwm = 580;
 
     return servo_pwm;
 }
@@ -1064,7 +1132,7 @@ void motor_servo_contral()
         // 状态4: 寻找并进入车库
         if (latest_park_id != 0) {
             // 已识别到车库，切换到车库PD控制
-            servo_pwm_now = servo_pd(160); 
+            servo_pwm_now = servo_pd_AB(160); 
             gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
         } else {
             // 未识别到车库，继续常规巡线
@@ -1102,7 +1170,7 @@ int main(int argc, char* argv[])
     // 初始化检测模型
     cout << "[初始化] 加载障碍物检测模型..." << endl;
     try {
-        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.4f, 0.4f, 4, false);
+        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.3f, 0.4f, 4, false);
         cout << "[初始化] 障碍物检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 障碍物检测模型加载失败: " << e.what() << endl;
@@ -1121,7 +1189,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载车库检测模型..." << endl;
     try {
-        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.4f, 0.5f, 4, false);
+        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.7f, 0.5f, 4, false);
         cout << "[初始化] 车库检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 车库检测模型加载失败: " << e.what() << endl;
@@ -1272,7 +1340,9 @@ int main(int argc, char* argv[])
                     program_finished = true; // 结束程序
                     continue; // 跳过本轮的motor_servo_contral
                 } else {
-                    // 时间未到，需要进行巡线计算
+                    // 时间未到，进行黄色竖线巡线
+                    yellow_line_pidx = find_yellow_line_pidx(frame);
+                    // 同时保留黑线巡线作为后备
                     Tracking(bin_image);
                 }
             }
