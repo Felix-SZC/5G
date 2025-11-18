@@ -107,7 +107,6 @@ int fache_sign = 0; // 标记发车信号
 int banma = 0; // 斑马线检测结果
 
 //----------------变道相关---------------------------------------------------
-int changeroad = 0; // 变道检测结果 (0=未识别, 1=左转, 2=右转)
 bool has_detected_turn_sign = false; // 是否已成功识别到转向标识
 
 //----------------避障相关---------------------------------------------------
@@ -1121,32 +1120,6 @@ void finalize_brief_stop_action()
     brief_stop_next_action = BriefStopNextAction::None;
 }
 
-// 功能: 按照 `changeroad` 状态执行左/右变道动作序列
-void motor_changeroad(){
-    if(changeroad == 1){ // 向左变道----------------------------------------------------------------
-        gpioPWM(12, 825); // 设置舵机PWM
-        gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(1200000); // RIGHT弯道
-        // usleep(1000000); // LEFT弯道
-        gpioPWM(12, 610); // 设置舵机PWM
-        gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(800000); // 延时550毫秒
-        gpioPWM(12, servo_pwm_mid); // 设置舵机PWM
-        gpioPWM(13, motor_pwm_mid + 1400); // 设置电机PWM
-    }
-    else if(changeroad == 2){ //向右变道----------------------------------------------------------------
-        gpioPWM(12, 620); // 设置舵机PWM
-        gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(1400000);
-        gpioPWM(12, 820); // 设置舵机PWM
-        gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(500000); // 延时550毫秒
-        gpioPWM(12, servo_pwm_mid); // 设置舵机PWM
-        gpioPWM(13, motor_pwm_mid + 1400); // 设置电机PWM
-    }
-}
-
-
 // 控制舵机电机
 // 功能: 根据状态机切换控制策略（巡线/避障/停车），并下发PWM
 void motor_servo_contral()
@@ -1214,8 +1187,15 @@ void motor_servo_contral()
     else if (is_parking_phase)
     {
         // 状态4: 寻找并进入车库标识
-        servo_pwm_now = servo_pd(160);
-        gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_POST_ZEBRA);
+        if (latest_park_id != 0) {
+            // 已识别到车库，跟随最近的A或B标识
+            servo_pwm_now = servo_pd_parking(parking_follow_x);
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_POST_ZEBRA);
+        } else {
+            // 未识别到车库，继续常规巡线
+            servo_pwm_now = servo_pd(160);
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_POST_ZEBRA);
+        }
     }
     else
     {
@@ -1387,9 +1367,8 @@ int main(int argc, char* argv[])
                         result = fastestdet_lr->detect(frame);
                         if (!result.empty())
                         {
-                            changeroad = result[0].label + 1; // label 0 -> left (1), label 1 -> right (2)
                             has_detected_turn_sign = true;    // 标记已成功识别
-                            cout << "[流程] 检测到转向标识：" << (changeroad == 1 ? "左转" : "右转") << endl;
+                            cout << "[流程] 检测到转向标识：" << (result[0].label == 0 ? "左转" : "右转") << endl;
                         }
                     }
                 }
@@ -1520,16 +1499,18 @@ int main(int argc, char* argv[])
                         float closest_y2 = closest_box.rect.y + closest_box.rect.height;
                         latest_park_id = closest_box.label + 1; // 0 for A -> 1, 1 for B -> 2
                         
+                        // 保存最近的AB标识中心x坐标，用于跟随控制
+                        float target_x = closest_box.rect.x + closest_box.rect.width / 2.0f;
+                        parking_follow_x = static_cast<int>(target_x);
+                        
                         cout << "[停车] 最近: " << (latest_park_id == 1 ? "A" : "B") 
                              << " | 计数 A:" << park_A_count << ", B:" << park_B_count
-                             << " | Y:" << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD << endl;
+                             << " | Y:" << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD
+                             << " | 跟随x:" << parking_follow_x << endl;
 
                         // 检查是否达到入库阈值（短暂停车期间不触发新的停车）
                         if (closest_y2 >= PARKING_Y_THRESHOLD && !is_brief_stop_active) {
-                            // 保存当前检测到的目标位置，避免短暂停车后丢失
-                            float target_x = closest_box.rect.x + closest_box.rect.width / 2.0f;
-                            parking_follow_x = static_cast<int>(target_x);
-                            
+                            // 目标位置已在上面保存
                             is_parking_phase = false; // 寻找阶段结束
                             is_pre_parking = false;
                             pending_pre_parking_label = -1; // 停车后再根据最终计数决定
@@ -1560,7 +1541,6 @@ int main(int argc, char* argv[])
                     if (banma == 1) {
                         is_stopping_at_zebra = true; //切换到停车状态
                         has_detected_turn_sign = false; // 重置转向标识检测标志
-                        changeroad = 0; // 重置转向方向
                         zebra_stop_start_time = std::chrono::steady_clock::now();
                         cout << "[流程] 检测到斑马线，准备停车识别" << endl;
                         banma_stop(); // 执行停车
