@@ -28,7 +28,7 @@ bool program_finished = false; // 控制主循环退出的标志
 const int MOTOR_SPEED_DELTA_PARK = 1000;   // 车库阶段速度增量
 const int MOTOR_SPEED_DELTA_BRAKE = -3000; // 瞬时反转/刹停增量
 const int MOTOR_SPEED_DELTA_PRE_ZEBRA = 2000;  // 蓝板移开后到斑马线停车前的巡线速度
-const int MOTOR_SPEED_DELTA_POST_ZEBRA = 1500; // 斑马线停车后到车库停车前的巡线速度
+const int MOTOR_SPEED_DELTA_POST_ZEBRA = 1300; // 斑马线停车后到车库停车前的巡线速度
 
 const float BRIEF_STOP_REVERSE_DURATION = 0.5f; // 反转阶段持续时间（秒）
 const float BRIEF_STOP_HOLD_DURATION = 0.1f;    // 刹停保持时间（秒）
@@ -1072,21 +1072,43 @@ void start_brief_stop(BriefStopType type, BriefStopNextAction next_action)
     cout << "[流程] " << reason << "触发短暂停车，执行反向刹停..." << endl;
 }
 
+int decide_parking_label_from_counts()
+{
+    if (park_A_count > park_B_count) return 0;
+    if (park_B_count > park_A_count) return 1;
+    if (latest_park_id != 0) return latest_park_id - 1;
+    return -1;
+}
+
 void finalize_brief_stop_action()
 {
-    if (brief_stop_next_action == BriefStopNextAction::EnterPreParking && pending_pre_parking_label != -1)
+    if (brief_stop_next_action == BriefStopNextAction::EnterPreParking)
     {
-        is_pre_parking = true;
-        pre_parking_start_time = std::chrono::steady_clock::now();
-        final_target_label = pending_pre_parking_label;
-        // 初始化预入库阶段的变量
-        parking_target_not_detected_count = 0;
-        parking_follow_x = 160; // 默认中心
-        parking_target_detected_this_frame = false;
-        cout << "[流程] 短暂停车结束，开始预入库阶段 -> "
-             << (final_target_label == 0 ? "A(左)" : "B(右)") 
-             << "，将跟随最远的" << (final_target_label == 0 ? "A" : "B") << "目标" << endl;
-        pending_pre_parking_label = -1;
+        int decided_label = pending_pre_parking_label;
+        if (decided_label == -1)
+        {
+            decided_label = decide_parking_label_from_counts();
+        }
+
+        if (decided_label != -1)
+        {
+            is_pre_parking = true;
+            pre_parking_start_time = std::chrono::steady_clock::now();
+            final_target_label = decided_label;
+            // 初始化预入库阶段的变量
+            parking_target_not_detected_count = 0;
+            parking_follow_x = 160; // 默认中心
+            parking_target_detected_this_frame = false;
+            cout << "[流程] 短暂停车结束，综合计数结果，开始预入库阶段 -> "
+                 << (final_target_label == 0 ? "A(左)" : "B(右)") 
+                 << "，将跟随最远的" << (final_target_label == 0 ? "A" : "B") << "目标" << endl;
+            pending_pre_parking_label = -1;
+        }
+        else
+        {
+            cout << "[警告] 短暂停车后仍无法确认A/B车库，继续保持寻找车库状态" << endl;
+            is_parking_phase = true;
+        }
     }
     else if (brief_stop_next_action == BriefStopNextAction::ResumeAvoidance)
     {
@@ -1180,17 +1202,10 @@ void motor_servo_contral()
         // 状态: 预入库阶段 - 跟随最远的A或B目标
         // 如果检测到目标，使用目标x坐标跟随；否则使用巡线坐标
         int target_x = parking_follow_x; // 默认使用上次记录的目标x坐标
-        
-        // 优先使用巡线坐标（如果巡线有效）
-        if (!mid.empty() && mid.size() >= 26) {
-            int line_x = (mid[23].x + mid[25].x) / 2; // 使用巡线中心坐标
-            if (!parking_target_detected_this_frame) {
-                // 如果当前帧没检测到目标，使用巡线坐标
-                target_x = line_x;
-            } else {
-                // 如果检测到目标，使用目标坐标跟随
-                target_x = parking_follow_x;
-            }
+        if (parking_target_detected_this_frame && !mid.empty() && mid.size() >= 26)
+        {
+            // 仅当当前帧检测到目标时，才使用目标坐标更新
+            target_x = parking_follow_x;
         }
         
         // 使用PD控制跟随目标x坐标（使用专门的parking PD控制器，P和D参数较大）
@@ -1250,7 +1265,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载车库检测模型..." << endl;
     try {
-        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.7f, 0.7f, 4, false);
+        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.85f, 0.85f, 4, false);
         cout << "[初始化] 车库检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 车库检测模型加载失败: " << e.what() << endl;
@@ -1513,27 +1528,11 @@ int main(int argc, char* argv[])
 
                         // 检查是否达到入库阈值（短暂停车期间不触发新的停车）
                         if (closest_y2 >= PARKING_Y_THRESHOLD && !is_brief_stop_active) {
-                            int park_target = 0;
-                            if (park_A_count > park_B_count) {
-                                park_target = 1; // Park in A
-                                cout << "[停车决策] A计数更多 (" << park_A_count << " vs " << park_B_count << ")，选择A车库" << endl;
-                            } else if (park_B_count > park_A_count) {
-                                park_target = 2; // Park in B
-                                cout << "[停车决策] B计数更多 (" << park_B_count << " vs " << park_A_count << ")，选择B车库" << endl;
-                            } else {
-                                // Counts are equal or both zero, default to the closest one
-                                park_target = latest_park_id;
-                                cout << "[停车决策] A/B计数相同，选择最近的车库: " << (park_target == 1 ? "A" : "B") << endl;
-                            }
-
-                            if (park_target != 0) {
-                                is_parking_phase = false; // 寻找阶段结束
-                                is_pre_parking = false;
-                                pending_pre_parking_label = park_target - 1; // 锁定目标 (A->0, B->1)
-                                start_brief_stop(BriefStopType::Parking, BriefStopNextAction::EnterPreParking);
-                                cout << "[流程] 达到初步阈值，锁定目标 " << (park_target == 1 ? "A(左)" : "B(右)") 
-                                     << "，先短暂停车再执行预入库微调" << endl;
-                            }
+                            is_parking_phase = false; // 寻找阶段结束
+                            is_pre_parking = false;
+                            pending_pre_parking_label = -1; // 停车后再根据最终计数决定
+                            start_brief_stop(BriefStopType::Parking, BriefStopNextAction::EnterPreParking);
+                            cout << "[流程] 达到入库阈值，先短暂停车收集更多A/B计数再决策" << endl;
                         }
                     }
                     else 
