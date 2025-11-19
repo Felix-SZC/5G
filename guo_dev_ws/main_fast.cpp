@@ -214,6 +214,7 @@ const double BLUE_AREA_VALID = 2000.0; // 有效面积阈值
 // 蓝色挡板移开检测参数
 const double BLUE_REMOVE_AREA_MIN = 500.0; // 移开检测的最小面积阈值（过滤小噪点）
 
+//---------------斑马线检测参数（可调节）------------------------------------------
 // 斑马线检测ROI区域
 const int BANMA_ROI_X = 30;           // ROI左上角X坐标
 const int BANMA_ROI_Y = 110;          // ROI左上角Y坐标 (下移)
