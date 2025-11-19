@@ -1232,7 +1232,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载车库检测模型..." << endl;
     try {
-        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.7f, 0.7f, 4, false);
+        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.3f, 0.3, 4, false);
         cout << "[初始化] 车库检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 车库检测模型加载失败: " << e.what() << endl;
@@ -1439,6 +1439,36 @@ int main(int argc, char* argv[])
                     cout << "[流程] 预入库完成（连续" << PARKING_DETECT_MISS_THRESHOLD 
                          << "帧未检测到目标），刹车！" << endl;
                     gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock); // 停车
+                    
+                    // 关闭当前摄像头
+                    capture.release();
+                    
+                    // 重新打开摄像头，设置为最高分辨率
+                    cout << "[流程] 重新打开摄像头，设置为最高分辨率(1280x720)..." << endl;
+                    capture.open(0);
+                    capture.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+                    capture.set(cv::CAP_PROP_FPS, 30);
+                    capture.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
+                    capture.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+                    
+                    if (!capture.isOpened()) {
+                        cerr << "[错误] 无法重新打开摄像头" << endl;
+                    } else {
+                        cout << "[流程] 摄像头已设置为: " << capture.get(cv::CAP_PROP_FRAME_WIDTH) 
+                             << "x" << capture.get(cv::CAP_PROP_FRAME_HEIGHT) << endl;
+                        cout << "[流程] 开始显示高分辨率图像，按'q'键退出..." << endl;
+                        
+                        // 持续显示高分辨率图像
+                        cv::Mat high_res_frame;
+                        while (capture.read(high_res_frame) && !high_res_frame.empty()) {
+                            cv::imshow("Parking Complete - High Resolution", high_res_frame);
+                            if ((cv::waitKey(1) & 0xFF) == 'q') {
+                                break;
+                            }
+                        }
+                        cv::destroyAllWindows();
+                    }
+                    
                     program_finished = true;
                     continue;
                 }
