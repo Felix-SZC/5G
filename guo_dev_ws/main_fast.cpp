@@ -214,17 +214,8 @@ const double BLUE_AREA_VALID = 2000.0; // 有效面积阈值
 // 蓝色挡板移开检测参数
 const double BLUE_REMOVE_AREA_MIN = 500.0; // 移开检测的最小面积阈值（过滤小噪点）
 
-//---------------斑马线检测参数（可调节）------------------------------------------
-// HSV白色范围
-const int BANMA_WHITE_H_MIN = 0;    // 色调H最小值
-const int BANMA_WHITE_H_MAX = 180;  // 色调H最大值
-const int BANMA_WHITE_S_MIN = 0;    // 饱和度S最小值
-const int BANMA_WHITE_S_MAX = 30;   // 饱和度S最大值
-const int BANMA_WHITE_V_MIN = 200;  // 亮度V最小值（高亮度白色）
-const int BANMA_WHITE_V_MAX = 255;  // 亮度V最大值
-
 // 斑马线检测ROI区域
-const int BANMA_ROI_X = 60;           // ROI左上角X坐标
+const int BANMA_ROI_X = 30;           // ROI左上角X坐标
 const int BANMA_ROI_Y = 110;          // ROI左上角Y坐标 (下移)
 const int BANMA_ROI_WIDTH = 260;      // ROI宽度
 const int BANMA_ROI_HEIGHT = 60;     // ROI高度 (减小)
@@ -237,9 +228,6 @@ const int BANMA_RECT_MAX_HEIGHT = 40;  // 矩形最大高度 (调低以排除车
 
 // 判定为斑马线需要的最少白色矩形数量 (根据实际情况调整)
 const int BANMA_MIN_COUNT = 4;
-
-// 形态学处理参数
-const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
 
 //--------------------------------------------------------------------------
 
@@ -839,7 +827,7 @@ int banma_get(cv::Mat &frame) {
 
     // 3. 顶帽变换 - 核心步骤，用于在复杂光照下突出白色条纹
     cv::Mat topHat;
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(40, 3));
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(20, 3));
     cv::morphologyEx(grayRoi, topHat, cv::MORPH_TOPHAT, kernel);
 
     // 4. 二值化

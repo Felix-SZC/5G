@@ -15,10 +15,10 @@ using namespace cv;
 
 //--------------- 斑马线检测参数 (优化后) ------------------------------------------
 // 斑马线检测ROI区域 (收紧以聚焦路面)
-const int BANMA_ROI_X = 40;           // ROI左上角X坐标
-const int BANMA_ROI_Y = 100;          // ROI左上角Y坐标 (下移)
+const int BANMA_ROI_X = 30;           // ROI左上角X坐标
+const int BANMA_ROI_Y = 110;          // ROI左上角Y坐标 (下移)
 const int BANMA_ROI_WIDTH = 260;      // ROI宽度
-const int BANMA_ROI_HEIGHT = 100;     // ROI高度 (减小)
+const int BANMA_ROI_HEIGHT = 60;     // ROI高度 (减小)
 
 // 斑马线矩形筛选尺寸
 const int BANMA_RECT_MIN_WIDTH = 5;   // 矩形最小宽度 (调高以过滤噪点)
@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
 
     // 4. 顶帽变换 - 核心步骤，用于在复杂光照下突出白色条纹
     cv::Mat topHat;
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(40, 3));
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(20, 3));
     cv::morphologyEx(grayRoi, topHat, cv::MORPH_TOPHAT, kernel);
     imshow("4. Top-Hat Transform", topHat);
     cout << "按任意键继续..." << endl;
