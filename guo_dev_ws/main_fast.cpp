@@ -216,16 +216,16 @@ const double BLUE_REMOVE_AREA_MIN = 500.0; // 移开检测的最小面积阈值�
 
 //---------------斑马线检测参数（可调节）------------------------------------------
 // 斑马线检测ROI区域
-const int BANMA_ROI_X = 30;           // ROI左上角X坐标
-const int BANMA_ROI_Y = 110;          // ROI左上角Y坐标 (下移)
-const int BANMA_ROI_WIDTH = 260;      // ROI宽度
+const int BANMA_ROI_X = 10;           // ROI左上角X坐标
+const int BANMA_ROI_Y = 150;          // ROI左上角Y坐标 (下移)
+const int BANMA_ROI_WIDTH = 300;      // ROI宽度
 const int BANMA_ROI_HEIGHT = 60;     // ROI高度 (减小)
 
 // 斑马线矩形筛选尺寸
-const int BANMA_RECT_MIN_WIDTH = 7;   // 矩形最小宽度 (调高以过滤噪点)
-const int BANMA_RECT_MAX_WIDTH = 40;  // 矩形最大宽度
-const int BANMA_RECT_MIN_HEIGHT = 7;   // 矩形最小高度
-const int BANMA_RECT_MAX_HEIGHT = 40;  // 矩形最大高度 (调低以排除车道线)
+const int BANMA_RECT_MIN_WIDTH = 10;   // 矩形最小宽度 (调高以过滤噪点)
+const int BANMA_RECT_MAX_WIDTH = 100;  // 矩形最大宽度
+const int BANMA_RECT_MIN_HEIGHT = 10;   // 矩形最小高度
+const int BANMA_RECT_MAX_HEIGHT = 100;  // 矩形最大高度 (调低以排除车道线)
 
 // 判定为斑马线需要的最少白色矩形数量 (根据实际情况调整)
 const int BANMA_MIN_COUNT = 4;
@@ -384,10 +384,10 @@ cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr)
     cv::morphologyEx(blurredRoi, topHat, cv::MORPH_TOPHAT, kernel_tophat);
 
     cv::Mat adaptiveMask;
-    cv::threshold(topHat, adaptiveMask, 5, 255, cv::THRESH_BINARY);
+    cv::threshold(topHat, adaptiveMask, 3, 255, cv::THRESH_BINARY);
 
     cv::Mat gradientMask;
-    cv::threshold(gradientMagnitude8U, gradientMask, 15, 255, cv::THRESH_BINARY); // 梯度二值掩码
+    cv::threshold(gradientMagnitude8U, gradientMask, 10, 255, cv::THRESH_BINARY); // 梯度二值掩码
     static cv::Mat kernel_gradient_dilate = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
     cv::dilate(gradientMask, gradientMask, kernel_gradient_dilate);
 
@@ -828,7 +828,7 @@ int banma_get(cv::Mat &frame) {
 
     // 3. 顶帽变换 - 核心步骤，用于在复杂光照下突出白色条纹
     cv::Mat topHat;
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(20, 3));
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(30, 3));
     cv::morphologyEx(grayRoi, topHat, cv::MORPH_TOPHAT, kernel);
 
     // 4. 二值化
@@ -879,7 +879,7 @@ float servo_pd(int target) { // 赛道巡线控制
     int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
 
     float kp = 0.8; // 比例系数
-    float kd = 1.6; // 微分系数
+    float kd = 2.0; // 微分系数
 
     error_first = target - pidx; // 计算误差
 

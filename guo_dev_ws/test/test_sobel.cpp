@@ -90,13 +90,13 @@ int main(int argc, char** argv) {
     waitKey(0);
 
     Mat adaptiveMask;
-    threshold(topHat, adaptiveMask, 5, 255, THRESH_BINARY);
+    threshold(topHat, adaptiveMask, 3, 255, THRESH_BINARY);
     imshow("7. Top-hat Threshold", adaptiveMask);
     cout << "按任意键继续..." << endl;
     waitKey(0);
 
     Mat gradientMask;
-    threshold(gradientMagnitude8u, gradientMask, 15, 255, THRESH_BINARY);
+    threshold(gradientMagnitude8u, gradientMask, 10, 255, THRESH_BINARY);
     Mat gradientKernel = getStructuringElement(MORPH_RECT, Size(3, 3));
     dilate(gradientMask, gradientMask, gradientKernel);
     imshow("8. Gradient Mask ROI", gradientMask);
