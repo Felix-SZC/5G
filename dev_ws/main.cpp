@@ -1221,7 +1221,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载车库检测模型..." << endl;
     try {
-        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.8f, 0.8f, 4, false);
+        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.7f, 0.7f, 4, false);
         cout << "[初始化] 车库检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 车库检测模型加载失败: " << e.what() << endl;

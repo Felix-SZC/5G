@@ -26,7 +26,8 @@ bool program_finished = false; // 控制主循环退出的标志
 
 //------------速度参数配置------------------------------------------------------------------------------------------
 const int MOTOR_SPEED_DELTA_CRUISE = 1500; // 常规巡航速度增量
-const int MOTOR_SPEED_DELTA_AVOID = 1100;  // 避障阶段速度增量
+const int MOTOR_SPEED_DELTA_SEARCHING_PARK = 1300; // 常规巡航速度增量
+const int MOTOR_SPEED_DELTA_AVOID = 1000;  // 避障阶段速度增量
 const int MOTOR_SPEED_DELTA_PARK = 1000;   // 车库阶段速度增量
 const int MOTOR_SPEED_DELTA_BRAKE = -3000; // 瞬时反转/刹停增量
 
@@ -119,12 +120,12 @@ int last_known_bz_bottom = 0;
 int last_known_bz_heighest = 0;
 int count_bz = 0; // 避障计数器
 int bz_disappear_count = 0; // 障碍物连续消失计数
-const int BZ_DISAPPEAR_THRESHOLD = 3; // 确认障碍物消失的帧数阈值
+const int BZ_DISAPPEAR_THRESHOLD = 1; // 确认障碍物消失的帧数阈值
 const int BZ_Y_UPPER_THRESHOLD = 200; // 可见障碍物底部阈值 (上限)
 const int BZ_Y_LOWER_THRESHOLD = 40; // 触发避障的Y轴下限阈值 (下限)
 
 int bz_detect_count = 0; // 障碍物连续检测计数
-const int BZ_DETECT_THRESHOLD = 3; // 确认障碍物出现的帧数阈值
+const int BZ_DETECT_THRESHOLD = 2; // 确认障碍物出现的帧数阈值
 
 //----------------停车相关---------------------------------------------------
 int flag_turn_done = 0; // 转向完成标志
@@ -137,7 +138,7 @@ bool is_pre_parking = false; // 是否在预入库阶段
 int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
 int park_A_count = 0; // A车库累计识别次数
 int park_B_count = 0; // B车库累计识别次数
-const int PARKING_Y_THRESHOLD = 110; // 触发入库的Y轴阈值
+const int PARKING_Y_THRESHOLD = 120; // 触发入库的Y轴阈值
 int final_target_label = -1;       // 最终锁定的AB标志的label (0 for A, 1 for B)
 
 // 发车延时相关：挡板移开后等待3秒再开始电机/舵机控制
@@ -217,14 +218,14 @@ const double BLUE_REMOVE_AREA_MIN = 500.0; // 移开检测的最小面积阈值�
 //---------------斑马线检测参数（可调节）------------------------------------------
 // 斑马线检测ROI区域
 const int BANMA_ROI_X = 10;           // ROI左上角X坐标
-const int BANMA_ROI_Y = 120;          // ROI左上角Y坐标 (下移)
+const int BANMA_ROI_Y = 100;          // ROI左上角Y坐标 (下移)
 const int BANMA_ROI_WIDTH = 300;      // ROI宽度
-const int BANMA_ROI_HEIGHT = 60;     // ROI高度 (减小)
+const int BANMA_ROI_HEIGHT = 80;     // ROI高度 (减小)
 
 // 斑马线矩形筛选尺寸
-const int BANMA_RECT_MIN_WIDTH = 15;   // 矩形最小宽度 (调高以过滤噪点)
+const int BANMA_RECT_MIN_WIDTH = 10;   // 矩形最小宽度 (调高以过滤噪点)
 const int BANMA_RECT_MAX_WIDTH = 100;  // 矩形最大宽度
-const int BANMA_RECT_MIN_HEIGHT = 15;   // 矩形最小高度
+const int BANMA_RECT_MIN_HEIGHT = 10;   // 矩形最小高度
 const int BANMA_RECT_MAX_HEIGHT = 100;  // 矩形最大高度 (调低以排除车道线)
 
 // 判定为斑马线需要的最少白色矩形数量 (根据实际情况调整)
@@ -1169,7 +1170,7 @@ void motor_servo_contral()
         } else {
             // 未识别到车库，继续常规巡线
             servo_pwm_now = servo_pd(160);
-            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE);
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_SEARCHING_PARK);
         }
     }
     else if (is_in_avoidance) { // 使用避障状态锁来决定控制策略
@@ -1221,7 +1222,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载车库检测模型..." << endl;
     try {
-        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.8f, 0.8f, 4, false);
+        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.7f, 0.7f, 4, false);
         cout << "[初始化] 车库检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 车库检测模型加载失败: " << e.what() << endl;
