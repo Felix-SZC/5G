@@ -135,7 +135,7 @@ int main(int argc, char** argv) {
     
     // Hough直线检测
     vector<Vec4i> lines;
-    HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 20, 15, 8);
+    HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 10, 15, 8);
     cout << "检测到 " << lines.size() << " 条直线" << endl;
 
     // 在原图上绘制结果

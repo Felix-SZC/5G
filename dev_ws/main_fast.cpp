@@ -34,7 +34,7 @@ const float BRIEF_STOP_REVERSE_DURATION = 0.5f; // 反转阶段持续时间（�
 const float BRIEF_STOP_HOLD_DURATION = 0.1f;    // 刹停保持时间（秒）
 
 //---------------调试选项-------------------------------------------------
-const bool SHOW_SOBEL_DEBUG = true; // 是否显示Sobel调试窗口
+const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
 const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，减轻imshow开销
 
 //---------------性能统计---------------------------------------------------
@@ -176,7 +176,7 @@ const float yuntai_LR_pwm_duty_cycle_unlock = 63.0; //大左小右
 const int yuntai_UD_pin = 23; // 存储云台引脚号
 const float yuntai_UD_pwm_range = 1000.0; // 存储云台PWM范围
 const float yuntai_UD_pwm_frequency = 50.0; // 存储云台PWM频率
-const float yuntai_UD_pwm_duty_cycle_unlock = 58.0; //大上下小
+const float yuntai_UD_pwm_duty_cycle_unlock = 55.0; //大上下小
 
 //---------------平滑滤波相关-------------------------------------------------
 std::vector<cv::Point> last_mid; // 存储上一次的中线，用于平滑滤波
@@ -217,14 +217,14 @@ const double BLUE_REMOVE_AREA_MIN = 500.0; // 移开检测的最小面积阈值�
 //---------------斑马线检测参数（可调节）------------------------------------------
 // 斑马线检测ROI区域
 const int BANMA_ROI_X = 10;           // ROI左上角X坐标
-const int BANMA_ROI_Y = 150;          // ROI左上角Y坐标 (下移)
+const int BANMA_ROI_Y = 130;          // ROI左上角Y坐标 (下移)
 const int BANMA_ROI_WIDTH = 300;      // ROI宽度
 const int BANMA_ROI_HEIGHT = 60;     // ROI高度 (减小)
 
 // 斑马线矩形筛选尺寸
-const int BANMA_RECT_MIN_WIDTH = 10;   // 矩形最小宽度 (调高以过滤噪点)
+const int BANMA_RECT_MIN_WIDTH = 15;   // 矩形最小宽度 (调高以过滤噪点)
 const int BANMA_RECT_MAX_WIDTH = 100;  // 矩形最大宽度
-const int BANMA_RECT_MIN_HEIGHT = 10;   // 矩形最小高度
+const int BANMA_RECT_MIN_HEIGHT = 15;   // 矩形最小高度
 const int BANMA_RECT_MAX_HEIGHT = 100;  // 矩形最大高度 (调低以排除车道线)
 
 // 判定为斑马线需要的最少白色矩形数量 (根据实际情况调整)
