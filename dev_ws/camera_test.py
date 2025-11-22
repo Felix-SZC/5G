@@ -14,7 +14,7 @@ import time
 # 配置参数
 TARGET_WIDTH = 1280
 TARGET_HEIGHT = 720
-TARGET_FPS = 30  # 目标帧率
+TARGET_FPS = 10  # 目标帧率
 
 
 def show_camera():
@@ -62,13 +62,33 @@ def show_camera():
     window_name = f'Camera - {actual_width}x{actual_height}'
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     
+    # 清空初始缓冲区 - 丢弃前几帧，避免旧帧堆积
+    print("正在清空摄像头缓冲区...")
+    for _ in range(5):
+        cap.read()
+    
     # 用于计算实际帧率
     frame_count = 0
-    start_time = time.time()
+    last_fps_time = time.time()
     fps_display = 0.0
+    fps_frame_count = 0
+    
+    # 用于帧跳过机制 - 如果处理跟不上，跳过旧帧
+    last_frame_time = time.time()
+    target_frame_interval = 1.0 / TARGET_FPS
     
     try:
         while True:
+            # 检查是否需要跳过帧（如果处理速度跟不上）
+            current_time = time.time()
+            time_since_last_frame = current_time - last_frame_time
+            
+            # 如果距离上一帧时间太短，说明处理速度跟不上，跳过这一帧
+            if time_since_last_frame < target_frame_interval * 0.5:
+                # 读取并丢弃这一帧，避免缓冲区堆积
+                cap.read()
+                continue
+            
             # 读取一帧
             ret, frame = cap.read()
             
@@ -77,12 +97,15 @@ def show_camera():
                 break
             
             frame_count += 1
+            fps_frame_count += 1
+            last_frame_time = current_time
             
-            # 每30帧计算一次实际帧率
-            if frame_count % 30 == 0:
-                elapsed_time = time.time() - start_time
-                fps_display = 30 / elapsed_time
-                start_time = time.time()
+            # 每秒计算一次实际帧率（更准确）
+            elapsed_since_fps = current_time - last_fps_time
+            if elapsed_since_fps >= 1.0:
+                fps_display = fps_frame_count / elapsed_since_fps
+                fps_frame_count = 0
+                last_fps_time = current_time
             
             # 在画面上显示信息
             info_text = f"Resolution: {actual_width}x{actual_height} | FPS: {fps_display:.1f}"
@@ -93,8 +116,8 @@ def show_camera():
             cv2.imshow(window_name, frame)
             
             # 检测按键，按 'q' 退出
-            # waitKey(1) 表示等待1毫秒，这样可以达到更高的帧率
-            key = cv2.waitKey(1) & 0xFF
+            # waitKey(10) 在树莓派上更稳定，避免CPU占用过高
+            key = cv2.waitKey(10) & 0xFF
             if key == ord('q') or key == ord('Q'):
                 print(f"\n用户按下 'q' 键，退出程序...")
                 print(f"总共处理了 {frame_count} 帧")
