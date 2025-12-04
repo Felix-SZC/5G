@@ -136,12 +136,7 @@ add_executable(SmartCar
     ${FASTESTDET_SOURCES}
 )
 
-add_executable(SmartCarFast
-    ${CMAKE_SOURCE_DIR}/main_fast.cpp
-    ${FASTESTDET_SOURCES}
-)
-
-foreach(target_name IN ITEMS SmartCar SmartCarFast)
+foreach(target_name IN ITEMS SmartCar)
     target_link_libraries(${target_name}
         ${PIGPIO_LIBRARY}
         ncnn
@@ -154,23 +149,19 @@ endforeach()
 # 链接 OpenMP 库
 if(OpenMP_CXX_FOUND)
     target_link_libraries(SmartCar OpenMP::OpenMP_CXX)
-    target_link_libraries(SmartCarFast OpenMP::OpenMP_CXX)
 else()
     # 手动链接 OpenMP 库
     target_link_libraries(SmartCar gomp)
-    target_link_libraries(SmartCarFast gomp)
 endif()
 
 # 设置输出位置为主目录
 set_target_properties(SmartCar PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
 )
-set_target_properties(SmartCarFast PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
-)
 
 message(STATUS "==============================================")
-message(STATUS "SmartCar will be built to: ${PROJECT_SOURCE_DIR}/SmartCar")
+message(STATUS "Executables will be built to: ${PROJECT_SOURCE_DIR}/")
+message(STATUS "  - SmartCar (from main.cpp)")
 message(STATUS "==============================================")
 
 # ============================================================
