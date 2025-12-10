@@ -37,6 +37,10 @@ const float START_DELAY_SECONDS = 2.0f;              // 发车延时时间（秒
 const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时间（秒）
 const float POST_ZEBRA_DELAY_SECONDS = 4.0f;        // 斑马线后巡线延迟时间（秒）
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
+const float LANE_CHANGE_DURATION_SECONDS = 1.5f;    // 变道持续时间（秒）
+const int SERVO_PWM_LEFT_TURN = 950;                // 左转PWM值
+const int SERVO_PWM_RIGHT_TURN = 600;               // 右转PWM值
+const int MOTOR_SPEED_DELTA_LANE_CHANGE = 1300;     // 变道速度增量
 
 //---------------调试选项-------------------------------------------------
 const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
@@ -58,6 +62,7 @@ enum class CarState {
     Avoidance,      // 避障
     ZebraStop,      // 在斑马线处等待
     PostZebra,      // 斑马线后恢复
+    LaneChange,     // 变道
     ParkingSearch,  // 寻找车库
     BriefStop,      // 短暂停车（反转）
     PreParking,     // 预入库（最终接近）
@@ -144,6 +149,8 @@ const int BZ_DETECT_THRESHOLD = 3; // 确认障碍物出现的帧数阈值
 int flag_turn_done = 0; // 转向完成标志
 std::chrono::steady_clock::time_point zebra_stop_start_time;
 std::chrono::steady_clock::time_point post_zebra_delay_start_time; // 斑马线后延迟计时器
+std::chrono::steady_clock::time_point lane_change_start_time;      // 变道计时器
+int turn_signal_label = -1;                                        // 转向标志 (0=left, 1=right)
 int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
 int park_A_count = 0; // A车库累计识别次数
 int park_B_count = 0; // B车库累计识别次数
@@ -1108,6 +1115,18 @@ void motor_servo_contral()
             gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_AVOID); // 避障时使用较慢速度
             break;
 
+        case CarState::LaneChange:
+            // 状态：盲跑变道
+            if (turn_signal_label == 0) { // Left
+                servo_pwm_now = SERVO_PWM_LEFT_TURN;
+            } else if (turn_signal_label == 1) { // Right
+                servo_pwm_now = SERVO_PWM_RIGHT_TURN;
+            } else {
+                servo_pwm_now = servo_pwm_mid; 
+            }
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_LANE_CHANGE);
+            break;
+
         case CarState::Cruise:
         case CarState::PostZebra:
             // 状态：常规巡线（包括寻找斑马线或避障间隙）
@@ -1296,6 +1315,7 @@ int main(int argc, char* argv[])
                         system("mpg123 /home/pi/dev_ws/月半猫.mp3 &");
                         zebra_stop_start_time = std::chrono::steady_clock::now();
                         has_detected_turn_sign = false;
+                        turn_signal_label = -1;
                         current_state = CarState::ZebraStop;
                     }
                 }
@@ -1423,6 +1443,7 @@ int main(int argc, char* argv[])
                             result = fastestdet_lr->detect(frame);
                             if (!result.empty()) {
                                 has_detected_turn_sign = true;
+                                turn_signal_label = result[0].label;
                                 cout << "[流程] 检测到转向标识：" << (result[0].label == 0 ? "左转" : "右转") << endl;
                             }
                         }
@@ -1441,8 +1462,25 @@ int main(int argc, char* argv[])
                 {
                     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - post_zebra_delay_start_time).count() / 1000000.0;
                     if (elapsed >= POST_ZEBRA_DELAY_SECONDS) {
-                        // 延迟时间结束，开始寻找车库
-                        cout << "[流程] " << static_cast<int>(POST_ZEBRA_DELAY_SECONDS) << "秒巡线结束，开始寻找并识别A/B车库" << endl;
+                        // 延迟时间结束，根据是否有转向标志决定下一步
+                        if (turn_signal_label != -1) {
+                             cout << "[流程] " << static_cast<int>(POST_ZEBRA_DELAY_SECONDS) << "秒巡线结束，开始变道 -> " << (turn_signal_label == 0 ? "左" : "右") << endl;
+                             lane_change_start_time = std::chrono::steady_clock::now();
+                             current_state = CarState::LaneChange;
+                        } else {
+                             cout << "[流程] " << static_cast<int>(POST_ZEBRA_DELAY_SECONDS) << "秒巡线结束，未检测到转向标志，直接开始寻找并识别A/B车库" << endl;
+                             current_state = CarState::ParkingSearch;
+                        }
+                    }
+                }
+                break;
+
+            case CarState::LaneChange:
+                // 盲跑变道，不进行视觉处理（或者仅做记录），依靠时间控制
+                {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - lane_change_start_time).count() / 1000000.0;
+                    if (elapsed >= LANE_CHANGE_DURATION_SECONDS) {
+                        cout << "[流程] 变道结束，开始寻找并识别A/B车库" << endl;
                         current_state = CarState::ParkingSearch;
                     }
                 }
