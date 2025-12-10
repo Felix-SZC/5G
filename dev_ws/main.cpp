@@ -63,6 +63,7 @@ enum class CarState {
     ZebraStop,      // 在斑马线处等待
     PostZebra,      // 斑马线后恢复
     LaneChange,     // 变道
+    ConeGuidance,   // 引导锥桶区域
     ParkingSearch,  // 寻找车库
     BriefStop,      // 短暂停车（反转）
     PreParking,     // 预入库（最终接近）
@@ -156,6 +157,13 @@ int park_A_count = 0; // A车库累计识别次数
 int park_B_count = 0; // B车库累计识别次数
 const int PARKING_Y_THRESHOLD = 120; // 触发入库的Y轴阈值
 int final_target_label = -1;       // 最终锁定的AB标志的标签（0表示A，1表示B）
+
+// 锥桶引导相关
+const int CONE_LANE_OFFSET = 120; // 锥桶单侧补全偏移量（像素）
+const int CONE_EXIT_THRESHOLD = 3; // 锥桶消失确认帧数
+bool has_seen_cones = false; // 是否已进入锥桶区域
+int cones_lost_count = 0; // 锥桶连续丢失计数
+int cone_target_x = -1; // 锥桶引导目标点X坐标（-1表示未检测到）
 
 // 发车延时相关：挡板移开后等待指定时间再开始电机/舵机控制
 std::chrono::steady_clock::time_point start_delay_time; // 挡板移开时间戳
@@ -668,6 +676,66 @@ bool Contour_Area(const vector<Point>& contour1, const vector<Point>& contour2)
     return contourArea(contour1) > contourArea(contour2); // 返回轮廓1是否大于轮廓2
 }
 
+// 功能: 计算锥桶引导目标点
+// 返回: 是否成功计算出目标点
+bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target_x) {
+    int sum_blue_x = 0;
+    int count_blue = 0;
+    int sum_yellow_x = 0;
+    int count_yellow = 0;
+
+    for (const auto& obj : objects) {
+        // 过滤置信度较低的目标（虽然fastestdet内部有阈值，这里可额外加）
+        // if (obj.prob < 0.5f) continue;
+
+        float cx = obj.rect.x + obj.rect.width / 2.0f;
+        
+        if (obj.label == 0) { // Blue
+            sum_blue_x += static_cast<int>(cx);
+            count_blue++;
+        } else if (obj.label == 1) { // Yellow
+            sum_yellow_x += static_cast<int>(cx);
+            count_yellow++;
+        }
+    }
+
+    if (count_blue > 0 && count_yellow > 0) {
+        float avg_blue = static_cast<float>(sum_blue_x) / count_blue;
+        float avg_yellow = static_cast<float>(sum_yellow_x) / count_yellow;
+        target_x = static_cast<int>((avg_blue + avg_yellow) / 2.0f);
+        return true;
+    } else if (count_blue > 0) {
+        float avg_blue = static_cast<float>(sum_blue_x) / count_blue;
+        // 如果蓝色锥桶在左侧（x < 160），说明车道在右侧，目标点需向右偏移
+        // 如果蓝色锥桶在右侧（x >= 160），说明车道在左侧，目标点需向左偏移
+        if (avg_blue < 160) {
+            target_x = static_cast<int>(avg_blue) + CONE_LANE_OFFSET;
+        } else {
+            target_x = static_cast<int>(avg_blue) - CONE_LANE_OFFSET;
+        }
+        
+        // 边界保护
+        if (target_x > 320) target_x = 320; 
+        if (target_x < 0) target_x = 0;
+        return true;
+    } else if (count_yellow > 0) {
+        float avg_yellow = static_cast<float>(sum_yellow_x) / count_yellow;
+        // 同理判断黄色锥桶位置
+        if (avg_yellow < 160) {
+            target_x = static_cast<int>(avg_yellow) + CONE_LANE_OFFSET;
+        } else {
+            target_x = static_cast<int>(avg_yellow) - CONE_LANE_OFFSET;
+        }
+
+        // 边界保护
+        if (target_x > 320) target_x = 320; 
+        if (target_x < 0) target_x = 0;
+        return true;
+    }
+
+    return false;
+}
+
 // 定义蓝色挡板 寻找函数
 // 功能: 在限定ROI内通过HSV阈值查找蓝色挡板，带连续帧计数确认
 void blue_card_find(void)  // 输入为mask图像
@@ -970,6 +1038,34 @@ float servo_pd_parking(int ab_center_x) { // 跟随AB目标控制，ab_center_x�
 
 
 
+// 功能: 锥桶引导PD控制器
+float servo_pd_cone(int target_x) {
+    int target = 160; // 图像中心作为目标
+    int pidx = target_x; // 当前锥桶引导计算出的目标点（实际上是我们希望车头对准的点）
+    // 注意：calculate_cone_target返回的是"车道中心在图像中的X坐标"
+    // 所以这里的error应该是 target(160) - pidx(lane_center_x)
+    // 如果 lane_center_x > 160 (在右边)，error < 0，需要右转（根据舵机方向调整）
+    
+    // 使用与常规巡线相似的参数
+    float kp = 0.8; 
+    float kd = 2.0; 
+
+    error_first = target - pidx; 
+
+    servo_pwm_diff = kp * error_first + kd * (error_first - last_error); 
+
+    last_error = error_first; 
+
+    servo_pwm = servo_pwm_mid + servo_pwm_diff; 
+
+    // 限制幅值
+    if (servo_pwm > 1000) servo_pwm = 1000;
+    else if (servo_pwm < 580) servo_pwm = 580;
+    
+    return servo_pwm; 
+}
+
+
 // 功能: 斑马线触发停车：电机回中、舵机回中并输出日志
 void banma_stop(){
     gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock - 3000); // 解锁状态，即停车
@@ -1125,6 +1221,18 @@ void motor_servo_contral()
                 servo_pwm_now = servo_pwm_mid; 
             }
             gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_LANE_CHANGE);
+            break;
+
+        case CarState::ConeGuidance:
+            // 状态：锥桶引导
+            if (cone_target_x != -1) {
+                // 如果计算出了锥桶目标，使用专门的锥桶PD控制
+                servo_pwm_now = servo_pd_cone(cone_target_x);
+            } else {
+                // 否则使用常规巡线
+                servo_pwm_now = servo_pd(160);
+            }
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE);
             break;
 
         case CarState::Cruise:
@@ -1480,9 +1588,43 @@ int main(int argc, char* argv[])
                 {
                     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - lane_change_start_time).count() / 1000000.0;
                     if (elapsed >= LANE_CHANGE_DURATION_SECONDS) {
-                        cout << "[流程] 变道结束，开始寻找并识别A/B车库" << endl;
-                        current_state = CarState::ParkingSearch;
+                        cout << "[流程] 变道结束，进入锥桶引导区域" << endl;
+                        current_state = CarState::ConeGuidance;
+                        has_seen_cones = false;
+                        cones_lost_count = 0;
+                        cone_target_x = -1;
                     }
+                }
+                break;
+
+            case CarState::ConeGuidance:
+                // 1. 常规巡线 (Fallback)
+                Tracking(bin_image);
+                
+                // 2. 检测锥桶
+                result = fastestdet_obs->detect(frame);
+                
+                // 3. 计算目标
+                {
+                    int target_tmp = 0;
+                    if (calculate_cone_target(result, target_tmp)) {
+                        cone_target_x = target_tmp;
+                        has_seen_cones = true;
+                        cones_lost_count = 0;
+                        // cout << "[锥桶引导] 目标X: " << cone_target_x << endl;
+                    } else {
+                        cone_target_x = -1; // 未检测到锥桶，标记为-1，motor_servo_contral将使用常规巡线
+                        if (has_seen_cones) {
+                            cones_lost_count++;
+                            cout << "[锥桶引导] 锥桶丢失计数: " << cones_lost_count << "/" << CONE_EXIT_THRESHOLD << endl;
+                        }
+                    }
+                }
+
+                // 4. 退出判定
+                if (has_seen_cones && cones_lost_count >= CONE_EXIT_THRESHOLD) {
+                    cout << "[流程] 通过锥桶区域，开始寻找A/B车库" << endl;
+                    current_state = CarState::ParkingSearch;
                 }
                 break;
 
