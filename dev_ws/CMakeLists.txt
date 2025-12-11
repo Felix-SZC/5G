@@ -28,10 +28,10 @@ endif()
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -march=native -mtune=native")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -mtune=native -Wall")
 
-# 设置输出目录为项目根目录
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR})
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
+# 设置输出目录为构建目录
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # ============================================================
 # 查找依赖库
@@ -136,7 +136,12 @@ add_executable(SmartCar
     ${FASTESTDET_SOURCES}
 )
 
-foreach(target_name IN ITEMS SmartCar)
+add_executable(SmartCarBackup
+    ${CMAKE_SOURCE_DIR}/main_backup.cpp
+    ${FASTESTDET_SOURCES}
+)
+
+foreach(target_name IN ITEMS SmartCar SmartCarBackup)
     target_link_libraries(${target_name}
         ${PIGPIO_LIBRARY}
         ncnn
@@ -149,19 +154,25 @@ endforeach()
 # 链接 OpenMP 库
 if(OpenMP_CXX_FOUND)
     target_link_libraries(SmartCar OpenMP::OpenMP_CXX)
+    target_link_libraries(SmartCarBackup OpenMP::OpenMP_CXX)
 else()
     # 手动链接 OpenMP 库
     target_link_libraries(SmartCar gomp)
+    target_link_libraries(SmartCarBackup gomp)
 endif()
 
-# 设置输出位置为主目录
+# 设置输出位置为构建目录
 set_target_properties(SmartCar PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
+)
+set_target_properties(SmartCarBackup PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
 )
 
 message(STATUS "==============================================")
-message(STATUS "Executables will be built to: ${PROJECT_SOURCE_DIR}/")
+message(STATUS "Main executables will be built to: ${PROJECT_SOURCE_DIR}/")
 message(STATUS "  - SmartCar (from main.cpp)")
+message(STATUS "  - SmartCarBackup (from main_backup.cpp)")
 message(STATUS "==============================================")
 
 # ============================================================
@@ -200,7 +211,7 @@ message(STATUS "  - test_banma: banma_get function demo")
 # ============================================================
 # 安装规则（可选）
 # ============================================================
-install(TARGETS SmartCar
+install(TARGETS SmartCar SmartCarBackup
     RUNTIME DESTINATION bin
 )
 

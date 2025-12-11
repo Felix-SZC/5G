@@ -123,7 +123,6 @@ int find_first = 0; // 标记是否第一次找到蓝色挡板
 int banma = 0; // 斑马线检测结果
 
 //----------------变道相关---------------------------------------------------
-bool has_detected_turn_sign = false; // 是否已成功识别到转向标识
 
 //----------------避障相关---------------------------------------------------
 int bz_heighest = 0; // 避障高度
@@ -155,6 +154,8 @@ int turn_signal_label = -1;                                        // 转向标�
 int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
 int park_A_count = 0; // A车库累计识别次数
 int park_B_count = 0; // B车库累计识别次数
+int turn_left_count = 0;    // 斑马线左转累计识别次数
+int turn_right_count = 0;   // 斑马线右转累计识别次数
 const int PARKING_Y_THRESHOLD = 120; // 触发入库的Y轴阈值
 int final_target_label = -1;       // 最终锁定的AB标志的标签（0表示A，1表示B）
 
@@ -1422,7 +1423,8 @@ int main(int argc, char* argv[])
                         banma_stop(); 
                         system("mpg123 /home/pi/dev_ws/月半猫.mp3 &");
                         zebra_stop_start_time = std::chrono::steady_clock::now();
-                        has_detected_turn_sign = false;
+                        turn_left_count = 0;
+                        turn_right_count = 0;
                         turn_signal_label = -1;
                         current_state = CarState::ZebraStop;
                     }
@@ -1545,18 +1547,35 @@ int main(int argc, char* argv[])
                 {
                     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - zebra_stop_start_time).count() / 1000000.0;
                     if (elapsed < ZEBRA_STOP_DURATION_SECONDS) {
-                        // 在停车时间内，持续检测转向标志
-                        if (!has_detected_turn_sign) {
-                            result.clear();
-                            result = fastestdet_lr->detect(frame);
-                            if (!result.empty()) {
-                                has_detected_turn_sign = true;
-                                turn_signal_label = result[0].label;
-                                cout << "[流程] 检测到转向标识：" << (result[0].label == 0 ? "左转" : "右转") << endl;
+                        // 在停车时间内，持续检测并计数转向标志
+                        result.clear();
+                        result = fastestdet_lr->detect(frame);
+                        if (!result.empty()) {
+                            for (const auto& obj : result) {
+                                if (obj.label == 0) { // left
+                                    turn_left_count++;
+                                } else if (obj.label == 1) { // right
+                                    turn_right_count++;
+                                }
                             }
                         }
+                        // 为了调试，可以打印计数值
+                        cout << "\r[Zebra] 计数中... 左: " << turn_left_count << ", 右: " << turn_right_count << "  " << std::flush;
                     } else {
-                        // 停车时间结束，无论是否识别到转向标识，都继续巡线
+                        // 停车时间结束，根据计数值决定转向
+                        cout << endl; // 换行
+                        if (turn_left_count > turn_right_count) {
+                            turn_signal_label = 0; // Left
+                            cout << "[流程] 转向决策: 左转 (L:" << turn_left_count << " > R:" << turn_right_count << ")" << endl;
+                        } else if (turn_right_count > turn_left_count) {
+                            turn_signal_label = 1; // Right
+                            cout << "[流程] 转向决策: 右转 (R:" << turn_right_count << " > L:" << turn_left_count << ")" << endl;
+                        } else {
+                            turn_signal_label = -1; // No turn if counts are equal or zero
+                            cout << "[流程] 转向决策: 直行 (计数 L:" << turn_left_count << ", R:" << turn_right_count << ")" << endl;
+                        }
+
+                        // 无论是否识别到转向标识，都继续巡线
                         cout << "[流程] 停车结束，开始" << static_cast<int>(POST_ZEBRA_DELAY_SECONDS) << "秒常规巡线..." << endl;
                         flag_turn_done = 1;
                         post_zebra_delay_start_time = std::chrono::steady_clock::now();
