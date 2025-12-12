@@ -72,6 +72,34 @@ enum class CarState {
 
 CarState current_state = CarState::Idle;
 
+// 功能: 将CarState枚举转换为可读字符串
+std::string carStateToString(CarState state) {
+    switch (state) {
+        case CarState::Idle:           return "Idle (等待发车)";
+        case CarState::StartDelay:     return "StartDelay (发车延时)";
+        case CarState::Cruise:         return "Cruise (正常行驶)";
+        case CarState::Avoidance:      return "Avoidance (避障)";
+        case CarState::ZebraStop:      return "ZebraStop (在斑马线处等待)";
+        case CarState::PostZebra:      return "PostZebra (斑马线后恢复)";
+        case CarState::LaneChange:     return "LaneChange (变道)";
+        case CarState::ConeGuidance:    return "ConeGuidance (引导锥桶区域)";
+        case CarState::ParkingSearch:  return "ParkingSearch (寻找车库)";
+        case CarState::BriefStop:      return "BriefStop (短暂停车)";
+        case CarState::PreParking:     return "PreParking (预入库)";
+        case CarState::ParkingComplete: return "ParkingComplete (完成)";
+        default:                       return "Unknown";
+    }
+}
+
+// 功能: 设置车辆状态并打印状态变更日志
+void setCarState(CarState newState) {
+    if (current_state != newState) {
+        std::cout << "[状态变更] " << carStateToString(current_state) 
+                  << " -> " << carStateToString(newState) << std::endl;
+        current_state = newState;
+    }
+}
+
 // 状态上下文变量
 std::chrono::steady_clock::time_point brief_stop_start_time;
 int pending_pre_parking_label = -1;
@@ -891,7 +919,7 @@ void blue_card_remove(void) // 输入为mask图像
     // 判断是否存在"有效蓝色轮廓"：若不存在，说明挡板已移开
     if (validContours.empty()) 
     {
-        current_state = CarState::StartDelay;
+        setCarState(CarState::StartDelay);
         start_delay_time = std::chrono::steady_clock::now();
         // 挡板移开后开始计时，延时指定时间再允许控制函数运行
     } 
@@ -1419,7 +1447,7 @@ int main(int argc, char* argv[])
                 auto elapsed_sec = std::chrono::duration_cast<std::chrono::microseconds>(now - start_delay_time).count() / 1000000.0;
                 if (elapsed_sec >= START_DELAY_SECONDS) {
                     cout << "[流程] 发车延时结束，开始巡航" << endl;
-                    current_state = CarState::Cruise;
+                    setCarState(CarState::Cruise);
                 }
             }
 
@@ -1478,7 +1506,7 @@ int main(int argc, char* argv[])
                         turn_left_count = 0;
                         turn_right_count = 0;
                         turn_signal_label = -1;
-                        current_state = CarState::ZebraStop;
+                        setCarState(CarState::ZebraStop);
                     }
                 }
                 else // 检查障碍物
@@ -1513,7 +1541,7 @@ int main(int argc, char* argv[])
                     // 连续检测到足够帧数，确认障碍物并进入避障模式
                     if (bz_detect_count >= BZ_DETECT_THRESHOLD) {
                         cout << "[流程] 确认蓝色障碍物，进入避障模式" << endl;
-                        current_state = CarState::Avoidance;
+                        setCarState(CarState::Avoidance);
                         
                         // 初始化避障相关参数
                         int box_y2 = static_cast<int>(blue_box.rect.y + blue_box.rect.height);
@@ -1590,7 +1618,7 @@ int main(int argc, char* argv[])
                         cout << "[流程] 障碍物已安全绕过，退出避障模式" << endl;
                         count_bz++;
                         bz_disappear_count = 0;
-                        current_state = CarState::Cruise;
+                        setCarState(CarState::Cruise);
                     }
                 }
                 break;
@@ -1631,7 +1659,7 @@ int main(int argc, char* argv[])
                         cout << "[流程] 停车结束，开始" << static_cast<int>(POST_ZEBRA_DELAY_SECONDS) << "秒常规巡线..." << endl;
                         flag_turn_done = 1;
                         post_zebra_delay_start_time = std::chrono::steady_clock::now();
-                        current_state = CarState::PostZebra;
+                        setCarState(CarState::PostZebra);
                     }
                 }
                 break;
@@ -1645,10 +1673,10 @@ int main(int argc, char* argv[])
                         if (turn_signal_label != -1) {
                              cout << "[流程] " << static_cast<int>(POST_ZEBRA_DELAY_SECONDS) << "秒巡线结束，开始变道 -> " << (turn_signal_label == 0 ? "左" : "右") << endl;
                              lane_change_start_time = std::chrono::steady_clock::now();
-                             current_state = CarState::LaneChange;
+                             setCarState(CarState::LaneChange);
                         } else {
                              cout << "[流程] " << static_cast<int>(POST_ZEBRA_DELAY_SECONDS) << "秒巡线结束，未检测到转向标志，直接开始寻找并识别A/B车库" << endl;
-                             current_state = CarState::ParkingSearch;
+                             setCarState(CarState::ParkingSearch);
                         }
                     }
                 }
@@ -1660,7 +1688,7 @@ int main(int argc, char* argv[])
                     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - lane_change_start_time).count() / 1000000.0;
                     if (elapsed >= LANE_CHANGE_DURATION_SECONDS) {
                         cout << "[流程] 变道结束，进入锥桶引导区域" << endl;
-                        current_state = CarState::ConeGuidance;
+                        setCarState(CarState::ConeGuidance);
                         has_seen_cones = false;
                         cones_lost_count = 0;
                         cone_target_x = -1;
@@ -1695,7 +1723,7 @@ int main(int argc, char* argv[])
                 // 4. 退出判定
                 if (has_seen_cones && cones_lost_count >= CONE_EXIT_THRESHOLD) {
                     cout << "[流程] 通过锥桶区域，开始寻找A/B车库" << endl;
-                    current_state = CarState::ParkingSearch;
+                    setCarState(CarState::ParkingSearch);
                 }
                 break;
 
@@ -1738,7 +1766,7 @@ int main(int argc, char* argv[])
                             cout << "[流程] 达到入库阈值，触发短暂停车，位置 x=" << parking_follow_x << endl;
                             pending_pre_parking_label = -1;
                             brief_stop_start_time = std::chrono::steady_clock::now();
-                            current_state = CarState::BriefStop;
+                            setCarState(CarState::BriefStop);
                         }
                     } else {
                         // 未检测到有效目标，重置车库ID
@@ -1767,11 +1795,11 @@ int main(int argc, char* argv[])
                             
                             cout << "[流程] 短暂停车结束，开始预入库 -> "
                                  << (final_target_label == 0 ? "A(左)" : "B(右)") << endl;
-                            current_state = CarState::PreParking;
+                            setCarState(CarState::PreParking);
                         } else {
                             // 无法确认目标，继续寻找
                             cout << "[警告] 无法确认A/B，继续寻找" << endl;
-                            current_state = CarState::ParkingSearch;
+                            setCarState(CarState::ParkingSearch);
                         }
                     }
                 }
@@ -1819,7 +1847,7 @@ int main(int argc, char* argv[])
                     if (parking_target_not_detected_count >= PARKING_DETECT_MISS_THRESHOLD) {
                         cout << "[流程] 预入库完成，停车！" << endl;
                         gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock);
-                        current_state = CarState::ParkingComplete;
+                        setCarState(CarState::ParkingComplete);
                         
                         // 切换到高分辨率显示模式
                         capture.release();
