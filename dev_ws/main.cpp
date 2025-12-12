@@ -1066,6 +1066,46 @@ float servo_pd_cone(int target_x) {
     return servo_pwm; 
 }
 
+// 功能: 寻找车库阶段的巡线PD控制器（参数更平缓以适应低帧率）
+float servo_pd_parking_cruise(int target) { 
+    if (mid.size() < 26) {
+        return servo_pwm_mid;
+    }
+    int pidx = int((mid[23].x + mid[25].x) / 2);
+
+    float kp = 0.65; // 比例系数 (低于常规的0.8)
+    float kd = 2.0;  // 微分系数 (低于常规的3.0)
+
+    error_first = target - pidx;
+    servo_pwm_diff = kp * error_first + kd * (error_first - last_error);
+    last_error = error_first;
+    servo_pwm = servo_pwm_mid + servo_pwm_diff;
+
+    if (servo_pwm > 1000) servo_pwm = 1000;
+    else if (servo_pwm < 580) servo_pwm = 580;
+    return servo_pwm;
+}
+
+// 功能: 锥桶引导阶段的后备巡线PD控制器（参数更平缓以适应低帧率）
+float servo_pd_cone_cruise(int target) { 
+    if (mid.size() < 26) {
+        return servo_pwm_mid;
+    }
+    int pidx = int((mid[23].x + mid[25].x) / 2);
+
+    float kp = 0.65; // 比例系数 (低于常规的0.8)
+    float kd = 2.0;  // 微分系数 (低于常规的3.0)
+
+    error_first = target - pidx;
+    servo_pwm_diff = kp * error_first + kd * (error_first - last_error);
+    last_error = error_first;
+    servo_pwm = servo_pwm_mid + servo_pwm_diff;
+
+    if (servo_pwm > 1000) servo_pwm = 1000;
+    else if (servo_pwm < 580) servo_pwm = 580;
+    return servo_pwm;
+}
+
 
 // 功能: 斑马线触发停车：电机回中、舵机回中并输出日志
 void banma_stop(){
@@ -1206,8 +1246,8 @@ void motor_servo_contral()
                 servo_pwm_now = servo_pd_parking(parking_follow_x); 
                 gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
             } else {
-                // 未识别到车库，继续常规巡线
-                servo_pwm_now = servo_pd(160);
+                // 未识别到车库，使用为ParkingSearch优化的平缓巡线参数
+                servo_pwm_now = servo_pd_parking_cruise(160);
                 gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE);
             }
             break;
@@ -1236,8 +1276,8 @@ void motor_servo_contral()
                 // 如果计算出了锥桶目标，使用专门的锥桶PD控制
                 servo_pwm_now = servo_pd_cone(cone_target_x);
             } else {
-                // 否则使用常规巡线
-                servo_pwm_now = servo_pd(160);
+                // 否则使用为锥桶引导优化的平缓巡线参数
+                servo_pwm_now = servo_pd_cone_cruise(160);
             }
             gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE);
             break;
