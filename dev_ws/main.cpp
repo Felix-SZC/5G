@@ -366,7 +366,7 @@ cv::Mat drawWhiteLine(cv::Mat binaryImage, cv::Point start, cv::Point end, int l
 }
 
 // 功能: 提取巡线二值图（Sobel+亮度自适应+形态学），可选输出调试覆盖图
-cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr) 
+cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullptr) 
 {
     const cv::Size targetSize(320, 240);
     cv::Mat resizedFrame;
@@ -455,7 +455,13 @@ cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr)
         double angle = std::atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
         double length = std::hypot(l[3] - l[1], l[2] - l[0]);
 
-        if (std::abs(angle) > 5 && length > 8)
+        float angle_threshold = 5.0f;
+        if (state == CarState::Cruise || state == CarState::Avoidance || state == CarState::ParkingSearch)
+        {
+            angle_threshold = 15.0f;
+        }
+
+        if (std::abs(angle) > angle_threshold && length > 8)
         {
             cv::Vec4i adjustedLine = l;
             adjustedLine[0] += roiRect.x;
@@ -1437,7 +1443,7 @@ int main(int argc, char* argv[])
                 cv::Mat debugOverlay;
                 cv::Mat* debugPtr = (SHOW_SOBEL_DEBUG && shouldRefreshDebug) ? &debugOverlay : nullptr;
                 
-                bin_image = ImageSobel(frame, debugPtr);
+                bin_image = ImageSobel(frame, current_state, debugPtr);
 
                 // 可选：显示调试图像
                 if (SHOW_SOBEL_DEBUG && shouldRefreshDebug)
