@@ -35,11 +35,11 @@ const float BRIEF_STOP_REVERSE_DURATION = 0.5f; // 反转阶段持续时间（�
 const float BRIEF_STOP_HOLD_DURATION = 0.1f;    // 刹停保持时间（秒）
 const float START_DELAY_SECONDS = 2.0f;              // 发车延时时间（秒）
 const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时间（秒）
-const float POST_ZEBRA_DELAY_SECONDS = 4.0f;        // 斑马线后巡线延迟时间（秒）
+const float POST_ZEBRA_DELAY_SECONDS = 1.0f;        // 斑马线后巡线延迟时间（秒）
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
-const float LANE_CHANGE_DURATION_SECONDS = 1.5f;    // 变道持续时间（秒）
+const float LANE_CHANGE_DURATION_SECONDS = 0.8f;    // 变道持续时间（秒）
 const int SERVO_PWM_LEFT_TURN = 950;                // 左转PWM值
-const int SERVO_PWM_RIGHT_TURN = 600;               // 右转PWM值
+const int SERVO_PWM_RIGHT_TURN = 660;               // 右转PWM值
 const int MOTOR_SPEED_DELTA_LANE_CHANGE = 1300;     // 变道速度增量
 
 //---------------调试选项-------------------------------------------------
@@ -412,7 +412,7 @@ cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr)
     cv::threshold(topHat, adaptiveMask, 10, 255, cv::THRESH_BINARY);
 
     cv::Mat gradientMask;
-    cv::threshold(gradientMagnitude8U, gradientMask, 50, 255, cv::THRESH_BINARY); // 梯度二值掩码
+    cv::threshold(gradientMagnitude8U, gradientMask, 30, 255, cv::THRESH_BINARY); // 梯度二值掩码
     static cv::Mat kernel_gradient_dilate = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
     cv::dilate(gradientMask, gradientMask, kernel_gradient_dilate);
 
@@ -455,7 +455,7 @@ cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr)
         double angle = std::atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
         double length = std::hypot(l[3] - l[1], l[2] - l[0]);
 
-        if (std::abs(angle) > 15 && length > 8)
+        if (std::abs(angle) > 5 && length > 8)
         {
             cv::Vec4i adjustedLine = l;
             adjustedLine[0] += roiRect.x;
@@ -963,7 +963,7 @@ float servo_pd(int target) { // 赛道巡线控制
     int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
 
     float kp = 0.8; // 比例系数
-    float kd = 2.0; // 微分系数
+    float kd = 3.0; // 微分系数
 
     error_first = target - pidx; // 计算误差
 
@@ -1069,7 +1069,13 @@ float servo_pd_cone(int target_x) {
 
 // 功能: 斑马线触发停车：电机回中、舵机回中并输出日志
 void banma_stop(){
-    gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock - 3000); // 解锁状态，即停车
+    gpioPWM(servo_pin, servo_pwm_mid);
+    gpioPWM(servo_pin, servo_pwm_mid);
+    gpioPWM(servo_pin, servo_pwm_mid);
+    gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock - 5000); // 解锁状态，即停车
+    gpioPWM(servo_pin, servo_pwm_mid);
+    gpioPWM(servo_pin, servo_pwm_mid);
+    gpioPWM(servo_pin, servo_pwm_mid);
     usleep(static_cast<useconds_t>(BANMA_STOP_SLEEP_SECONDS * 1000000)); // 转换为微秒
     cout << "[流程] 检测到斑马线，车辆停车" << static_cast<int>(ZEBRA_STOP_DURATION_SECONDS) << "秒等待指令" << endl;
 }
@@ -1280,7 +1286,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载转向标志检测模型..." << endl;
     try {
-        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.6f, 0.6f, 4, false);
+        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.4f, 0.4f, 4, false);
         cout << "[初始化] 转向标志检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 转向标志检测模型加载失败: " << e.what() << endl;
