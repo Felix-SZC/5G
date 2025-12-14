@@ -188,9 +188,9 @@ const int PARKING_Y_THRESHOLD = 120; // 触发入库的Y轴阈值
 int final_target_label = -1;       // 最终锁定的AB标志的标签（0表示A，1表示B）
 
 // 锥桶引导相关
-const int CONE_LANE_OFFSET = 120; // 锥桶单侧补全偏移量（像素）
-const int CONE_ENTER_THRESHOLD = 3; // 确认锥桶出现的帧数阈值
-const int CONE_EXIT_THRESHOLD = 3; // 确认锥桶消失的帧数阈值
+const int CONE_LANE_OFFSET = 80; // 锥桶单侧补全偏移量（像素）
+const int CONE_ENTER_THRESHOLD = 10; // 确认锥桶出现的帧数阈值
+const int CONE_EXIT_THRESHOLD = 5; // 确认锥桶消失的帧数阈值
 bool has_seen_cones = false; // 是否已确认进入锥桶引导模式
 int cones_detect_count = 0; // 锥桶连续检测计数
 int cones_lost_count = 0; // 锥桶连续丢失计数
@@ -488,7 +488,7 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
         float angle_threshold = 5.0f;
         if (state == CarState::Cruise || state == CarState::Avoidance)
         {
-            angle_threshold = 15.0f;
+            angle_threshold = 25.0f;
         }
 
         if (std::abs(angle) > angle_threshold && length > 8)
@@ -998,8 +998,8 @@ float servo_pd(int target) { // 赛道巡线控制
 
     int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
 
-    float kp = 0.8; // 比例系数
-    float kd = 3.0; // 微分系数
+    float kp = 1.0; // 比例系数
+    float kd = 2.0; // 微分系数
 
     error_first = target - pidx; // 计算误差
 
@@ -1109,7 +1109,7 @@ float servo_pd_parking_cruise(int target) {
     }
     int pidx = int((mid[23].x + mid[25].x) / 2);
 
-    float kp = 0.65; // 比例系数 (低于常规的0.8)
+    float kp = 1.0; // 比例系数 (低于常规的0.8)
     float kd = 2.0;  // 微分系数 (低于常规的3.0)
 
     error_first = target - pidx;
@@ -1129,7 +1129,7 @@ float servo_pd_cone_cruise(int target) {
     }
     int pidx = int((mid[23].x + mid[25].x) / 2);
 
-    float kp = 0.65; // 比例系数 (低于常规的0.8)
+    float kp = 1.0; // 比例系数 (低于常规的0.8)
     float kd = 2.0;  // 微分系数 (低于常规的3.0)
 
     error_first = target - pidx;
@@ -1353,7 +1353,7 @@ int main(int argc, char* argv[])
     // 初始化检测模型
     cout << "[初始化] 加载障碍物检测模型..." << endl;
     try {
-        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.6f, 0.6f, 4, false);
+        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.5f, 0.5f, 4, false);
         cout << "[初始化] 障碍物检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 障碍物检测模型加载失败: " << e.what() << endl;
