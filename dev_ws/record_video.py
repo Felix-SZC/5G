@@ -4,7 +4,7 @@ import time
 import datetime
 
 # --- 配置 ---
-RESOLUTION = (1280, 720)  # 录制分辨率 (宽度, 高度)
+RESOLUTION = (1280, 960)  # 录制分辨率 (宽度, 高度)
 FPS = 10.0               # 录制帧率
 OUTPUT_DIR = 'recordings'  # 视频存放的文件夹名
 # --- 结束配置 ---

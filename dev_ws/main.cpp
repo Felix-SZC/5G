@@ -38,7 +38,7 @@ const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时
 const float POST_ZEBRA_DELAY_SECONDS = 1.0f;        // 斑马线后巡线延迟时间（秒）
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
 const float LANE_CHANGE_DURATION_SECONDS = 0.8f;    // 变道持续时间（秒）
-const int SERVO_PWM_LEFT_TURN = 950;                // 左转PWM值
+const int SERVO_PWM_LEFT_TURN = 800;                // 左转PWM值
 const int SERVO_PWM_RIGHT_TURN = 660;               // 右转PWM值
 const int MOTOR_SPEED_DELTA_LANE_CHANGE = 1300;     // 变道速度增量
 
@@ -189,8 +189,10 @@ int final_target_label = -1;       // 最终锁定的AB标志的标签（0表示
 
 // 锥桶引导相关
 const int CONE_LANE_OFFSET = 120; // 锥桶单侧补全偏移量（像素）
-const int CONE_EXIT_THRESHOLD = 3; // 锥桶消失确认帧数
-bool has_seen_cones = false; // 是否已进入锥桶区域
+const int CONE_ENTER_THRESHOLD = 3; // 确认锥桶出现的帧数阈值
+const int CONE_EXIT_THRESHOLD = 3; // 确认锥桶消失的帧数阈值
+bool has_seen_cones = false; // 是否已确认进入锥桶引导模式
+int cones_detect_count = 0; // 锥桶连续检测计数
 int cones_lost_count = 0; // 锥桶连续丢失计数
 int cone_target_x = -1; // 锥桶引导目标点X坐标（-1表示未检测到）
 
@@ -484,7 +486,7 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
         double length = std::hypot(l[3] - l[1], l[2] - l[0]);
 
         float angle_threshold = 5.0f;
-        if (state == CarState::Cruise || state == CarState::Avoidance || state == CarState::ParkingSearch)
+        if (state == CarState::Cruise || state == CarState::Avoidance)
         {
             angle_threshold = 15.0f;
         }
@@ -1360,7 +1362,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载转向标志检测模型..." << endl;
     try {
-        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.4f, 0.4f, 4, false);
+        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.1f, 0.1f, 4, false);
         cout << "[初始化] 转向标志检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 转向标志检测模型加载失败: " << e.what() << endl;
@@ -1690,6 +1692,7 @@ int main(int argc, char* argv[])
                         cout << "[流程] 变道结束，进入锥桶引导区域" << endl;
                         setCarState(CarState::ConeGuidance);
                         has_seen_cones = false;
+                        cones_detect_count = 0; // 重置检测计数器
                         cones_lost_count = 0;
                         cone_target_x = -1;
                     }
@@ -1703,24 +1706,37 @@ int main(int argc, char* argv[])
                 // 2. 检测锥桶
                 result = fastestdet_obs->detect(frame);
                 
-                // 3. 计算目标
+                // 3. 计算目标并更新状态
                 {
                     int target_tmp = 0;
-                    if (calculate_cone_target(result, target_tmp)) {
+                    bool cone_found_this_frame = calculate_cone_target(result, target_tmp);
+
+                    if (cone_found_this_frame) {
                         cone_target_x = target_tmp;
-                        has_seen_cones = true;
-                        cones_lost_count = 0;
-                        // cout << "[锥桶引导] 目标X: " << cone_target_x << endl;
+                        cones_lost_count = 0; // 重置丢失计数
+                        if (!has_seen_cones) {
+                            cones_detect_count++; // 累加检测计数
+                            cout << "[锥桶搜索] 发现锥桶，计数: " << cones_detect_count << "/" << CONE_ENTER_THRESHOLD << endl;
+                        }
                     } else {
-                        cone_target_x = -1; // 未检测到锥桶，标记为-1，motor_servo_contral将使用常规巡线
+                        cone_target_x = -1; // 未检测到，使用后备巡线
+                        if (cones_detect_count > 0) {
+                             cout << "[锥桶搜索] 锥桶丢失，重置检测计数" << endl;
+                             cones_detect_count = 0; // 如果中断，则重置检测计数
+                        }
                         if (has_seen_cones) {
-                            cones_lost_count++;
+                            cones_lost_count++; // 如果已在引导模式，累加丢失计数
                             cout << "[锥桶引导] 锥桶丢失计数: " << cones_lost_count << "/" << CONE_EXIT_THRESHOLD << endl;
                         }
                     }
                 }
 
-                // 4. 退出判定
+                // 4. 状态切换判定
+                if (!has_seen_cones && cones_detect_count >= CONE_ENTER_THRESHOLD) {
+                    cout << "[流程] 确认锥桶引导，进入引导模式" << endl;
+                    has_seen_cones = true;
+                }
+                
                 if (has_seen_cones && cones_lost_count >= CONE_EXIT_THRESHOLD) {
                     cout << "[流程] 通过锥桶区域，开始寻找A/B车库" << endl;
                     setCarState(CarState::ParkingSearch);
