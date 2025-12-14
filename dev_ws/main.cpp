@@ -37,9 +37,9 @@ const float START_DELAY_SECONDS = 2.0f;              // 发车延时时间（秒
 const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时间（秒）
 const float POST_ZEBRA_DELAY_SECONDS = 1.0f;        // 斑马线后巡线延迟时间（秒）
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
-const float LANE_CHANGE_DURATION_SECONDS = 0.8f;    // 变道持续时间（秒）
-const int SERVO_PWM_LEFT_TURN = 800;                // 左转PWM值
-const int SERVO_PWM_RIGHT_TURN = 660;               // 右转PWM值
+const float LANE_CHANGE_DURATION_SECONDS = 1.2f;    // 变道持续时间（秒）
+const int SERVO_PWM_LEFT_TURN = 780;                // 左转PWM值
+const int SERVO_PWM_RIGHT_TURN = 680;               // 右转PWM值
 const int MOTOR_SPEED_DELTA_LANE_CHANGE = 1300;     // 变道速度增量
 
 //---------------调试选项-------------------------------------------------
@@ -189,7 +189,8 @@ int final_target_label = -1;       // 最终锁定的AB标志的标签（0表示
 
 // 锥桶引导相关
 const int CONE_LANE_OFFSET = 120; // 锥桶单侧补全偏移量（像素）
-const int CONE_ENTER_THRESHOLD = 3; // 确认锥桶出现的帧数阈值
+const float CONE_ENTER_CONF_THRESHOLD = 0.7f; // 进入引导模式的置信度阈值
+const int CONE_ENTER_THRESHOLD = 10; // 确认锥桶出现的帧数阈值
 const int CONE_EXIT_THRESHOLD = 3; // 确认锥桶消失的帧数阈值
 bool has_seen_cones = false; // 是否已确认进入锥桶引导模式
 int cones_detect_count = 0; // 锥桶连续检测计数
@@ -713,64 +714,93 @@ bool Contour_Area(const vector<Point>& contour1, const vector<Point>& contour2)
     return contourArea(contour1) > contourArea(contour2); // 返回轮廓1是否大于轮廓2
 }
 
-// 功能: 计算锥桶引导目标点
+// 辅助函数：根据fitLine的结果计算在指定y坐标处的x坐标
+float get_x_at_y(const cv::Vec4f& line, int y) {
+    float vx = line[0], vy = line[1], x0 = line[2], y0 = line[3];
+    // 避免除以零（水平线的情况）
+    if (std::abs(vy) < 1e-6) {
+        return x0;
+    }
+    return x0 + (y - y0) * vx / vy;
+}
+
+// 功能: 计算锥桶引导目标点（V3 - 统一拟合策略）
 // 返回: 是否成功计算出目标点
-bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target_x) {
-    int sum_blue_x = 0;
-    int count_blue = 0;
-    int sum_yellow_x = 0;
-    int count_yellow = 0;
+bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target_x, float& avg_blue_x_out, float& avg_yellow_x_out) {
+    std::vector<cv::Point> blue_points, yellow_points;
+    int sum_blue_x = 0, sum_yellow_x = 0;
 
+    // 1. 数据分组与平均值计算
     for (const auto& obj : objects) {
-        // 过滤置信度较低的目标（虽然fastestdet内部有阈值，这里可额外加）
-        // if (obj.prob < 0.5f) continue;
-
-        float cx = obj.rect.x + obj.rect.width / 2.0f;
-        
+        cv::Point center(obj.rect.x + obj.rect.width / 2, obj.rect.y + obj.rect.height / 2);
         if (obj.label == 0) { // Blue
-            sum_blue_x += static_cast<int>(cx);
-            count_blue++;
+            blue_points.push_back(center);
+            sum_blue_x += center.x;
         } else if (obj.label == 1) { // Yellow
-            sum_yellow_x += static_cast<int>(cx);
-            count_yellow++;
+            yellow_points.push_back(center);
+            sum_yellow_x += center.x;
         }
     }
 
-    if (count_blue > 0 && count_yellow > 0) {
-        float avg_blue = static_cast<float>(sum_blue_x) / count_blue;
-        float avg_yellow = static_cast<float>(sum_yellow_x) / count_yellow;
-        target_x = static_cast<int>((avg_blue + avg_yellow) / 2.0f);
-        return true;
-    } else if (count_blue > 0) {
-        float avg_blue = static_cast<float>(sum_blue_x) / count_blue;
-        // 如果蓝色锥桶在左侧（x < 160），说明车道在右侧，目标点需向右偏移
-        // 如果蓝色锥桶在右侧（x >= 160），说明车道在左侧，目标点需向左偏移
-        if (avg_blue < 160) {
-            target_x = static_cast<int>(avg_blue) + CONE_LANE_OFFSET;
-        } else {
-            target_x = static_cast<int>(avg_blue) - CONE_LANE_OFFSET;
+    // 更新日志输出用的平均值
+    avg_blue_x_out = blue_points.empty() ? -1.0f : static_cast<float>(sum_blue_x) / blue_points.size();
+    avg_yellow_x_out = yellow_points.empty() ? -1.0f : static_cast<float>(sum_yellow_x) / yellow_points.size();
+
+    bool blue_line_ok = false, yellow_line_ok = false;
+    cv::Vec4f blue_line, yellow_line;
+    const int lookahead_y = 180; // 预瞄行
+
+    // 2. 直线拟合
+    if (blue_points.size() >= 2) {
+        cv::fitLine(blue_points, blue_line, cv::DIST_L2, 0, 0.01, 0.01);
+        blue_line_ok = true;
+    }
+    if (yellow_points.size() >= 2) {
+        cv::fitLine(yellow_points, yellow_line, cv::DIST_L2, 0, 0.01, 0.01);
+        yellow_line_ok = true;
+    }
+
+    // 3. 路径决策
+    if (blue_line_ok && yellow_line_ok) {
+        // --- 情况一：双边拟合成功 ---
+        float blue_x = get_x_at_y(blue_line, lookahead_y);
+        float yellow_x = get_x_at_y(yellow_line, lookahead_y);
+        target_x = static_cast<int>((blue_x + yellow_x) / 2);
+        cout << "[锥桶引导] 模式: 双边拟合 -> 目标X: " << target_x << endl;
+
+    } else if (blue_line_ok) {
+        // --- 情况二：仅蓝边拟合成功 ---
+        float blue_x = get_x_at_y(blue_line, lookahead_y);
+        // 如果蓝色锥桶平均x在图像左侧，我们向右偏移，反之向左
+        target_x = static_cast<int>(blue_x + (avg_blue_x_out < 160 ? CONE_LANE_OFFSET : -CONE_LANE_OFFSET));
+        cout << "[锥桶引导] 模式: 仅蓝边拟合 -> 目标X: " << target_x << endl;
+
+    } else if (yellow_line_ok) {
+        // --- 情况二：仅黄边拟合成功 ---
+        float yellow_x = get_x_at_y(yellow_line, lookahead_y);
+        // 如果黄色锥桶平均x在图像左侧，我们向右偏移，反之向左
+        target_x = static_cast<int>(yellow_x + (avg_yellow_x_out < 160 ? CONE_LANE_OFFSET : -CONE_LANE_OFFSET));
+        cout << "[锥桶引导] 模式: 仅黄边拟合 -> 目标X: " << target_x << endl;
+
+    } else {
+        // --- 情况三：拟合失败，回退到简单逻辑 ---
+        if (objects.empty()) {
+            return false; // 没有任何锥桶，无法计算
         }
         
-        // 边界保护
-        if (target_x > 320) target_x = 320; 
-        if (target_x < 0) target_x = 0;
-        return true;
-    } else if (count_yellow > 0) {
-        float avg_yellow = static_cast<float>(sum_yellow_x) / count_yellow;
-        // 同理判断黄色锥桶位置
-        if (avg_yellow < 160) {
-            target_x = static_cast<int>(avg_yellow) + CONE_LANE_OFFSET;
-        } else {
-            target_x = static_cast<int>(avg_yellow) - CONE_LANE_OFFSET;
+        // 使用所有可见锥桶的平均值进行简单避让
+        int total_sum_x = 0;
+        for(const auto& obj : objects) {
+            total_sum_x += obj.rect.x + obj.rect.width / 2;
         }
-
-        // 边界保护
-        if (target_x > 320) target_x = 320; 
-        if (target_x < 0) target_x = 0;
-        return true;
+        float avg_all_x = static_cast<float>(total_sum_x) / objects.size();
+        target_x = static_cast<int>(avg_all_x + (avg_all_x < 160 ? CONE_LANE_OFFSET : -CONE_LANE_OFFSET));
+        cout << "[锥桶引导] 模式: 回退逻辑 -> 目标X: " << target_x << endl;
     }
 
-    return false;
+    // 4. 边界保护
+    target_x = std::max(0, std::min(320, target_x));
+    return true;
 }
 
 // 定义蓝色挡板 寻找函数
@@ -1084,7 +1114,7 @@ float servo_pd_cone(int target_x) {
     // 如果 lane_center_x > 160 (在右边)，error < 0，需要右转（根据舵机方向调整）
     
     // 使用与常规巡线相似的参数
-    float kp = 0.8; 
+    float kp = 0.65; 
     float kd = 2.0; 
 
     error_first = target - pidx; 
@@ -1353,7 +1383,7 @@ int main(int argc, char* argv[])
     // 初始化检测模型
     cout << "[初始化] 加载障碍物检测模型..." << endl;
     try {
-        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.6f, 0.6f, 4, false);
+        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.5f, 0.5f, 4, false);
         cout << "[初始化] 障碍物检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 障碍物检测模型加载失败: " << e.what() << endl;
@@ -1708,24 +1738,40 @@ int main(int argc, char* argv[])
                 
                 // 3. 计算目标并更新状态
                 {
+                    // --- 阶段1: 进入引导的条件判断 (使用高置信度阈值) ---
+                    if (!has_seen_cones) {
+                        bool high_conf_cone_found = false;
+                        for (const auto& obj : result) {
+                            if (obj.prob >= CONE_ENTER_CONF_THRESHOLD) {
+                                high_conf_cone_found = true;
+                                break;
+                            }
+                        }
+
+                        if (high_conf_cone_found) {
+                            cones_detect_count++;
+                            cout << "[锥桶搜索] 发现高置信度锥桶, 计数: " << cones_detect_count << "/" << CONE_ENTER_THRESHOLD << endl;
+                        } else {
+                            if (cones_detect_count > 0) {
+                                cout << "[锥桶搜索] 高置信度锥桶丢失, 重置检测计数" << endl;
+                                cones_detect_count = 0;
+                            }
+                        }
+                    }
+
+                    // --- 阶段2: 转向控制与退出判断 (使用默认检测结果) ---
                     int target_tmp = 0;
-                    bool cone_found_this_frame = calculate_cone_target(result, target_tmp);
+                    float avg_blue_x = -1.0f, avg_yellow_x = -1.0f;
+                    bool cone_found_this_frame = calculate_cone_target(result, target_tmp, avg_blue_x, avg_yellow_x);
 
                     if (cone_found_this_frame) {
                         cone_target_x = target_tmp;
-                        cones_lost_count = 0; // 重置丢失计数
-                        if (!has_seen_cones) {
-                            cones_detect_count++; // 累加检测计数
-                            cout << "[锥桶搜索] 发现锥桶，计数: " << cones_detect_count << "/" << CONE_ENTER_THRESHOLD << endl;
-                        }
+                        // 日志记录已移至 calculate_cone_target 函数内部
+                        cones_lost_count = 0; 
                     } else {
-                        cone_target_x = -1; // 未检测到，使用后备巡线
-                        if (cones_detect_count > 0) {
-                             cout << "[锥桶搜索] 锥桶丢失，重置检测计数" << endl;
-                             cones_detect_count = 0; // 如果中断，则重置检测计数
-                        }
+                        cone_target_x = -1; 
                         if (has_seen_cones) {
-                            cones_lost_count++; // 如果已在引导模式，累加丢失计数
+                            cones_lost_count++;
                             cout << "[锥桶引导] 锥桶丢失计数: " << cones_lost_count << "/" << CONE_EXIT_THRESHOLD << endl;
                         }
                     }
