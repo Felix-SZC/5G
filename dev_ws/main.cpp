@@ -202,6 +202,7 @@ const int PARKING_Y_THRESHOLD = 120; // 触发入库的Y轴阈值
 int final_target_label = -1;       // 最终锁定的AB标志的标签（0表示A，1表示B）
 
 // 锥桶引导相关
+int cone_outer_color = 0; // 0=蓝色为外侧边界, 1=黄色为外侧边界
 const int CONE_LANE_OFFSET = 80; // 锥桶单侧补全偏移量（像素）
 const int CONE_ENTER_THRESHOLD = 10; // 确认锥桶出现的帧数阈值
 const int CONE_EXIT_THRESHOLD = 5; // 确认锥桶消失的帧数阈值
@@ -728,8 +729,12 @@ bool Contour_Area(const vector<Point>& contour1, const vector<Point>& contour2)
 }
 
 // 功能: 计算锥桶引导目标点
+// 参数: objects - 检测到的锥桶对象列表
+//      target_x - 输出的目标点X坐标
+//      cone_outer_color - 配置变量，指定外侧边界颜色（0=蓝色为外侧边界, 1=黄色为外侧边界）
+//      last_turn_signal - 之前的转向动作（0=左转/左道，1=右转/右道）
 // 返回: 是否成功计算出目标点
-bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target_x) {
+bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target_x, int cone_outer_color, int last_turn_signal) {
     int sum_blue_x = 0;
     int count_blue = 0;
     int sum_yellow_x = 0;
@@ -751,34 +756,55 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
     }
 
     if (count_blue > 0 && count_yellow > 0) {
+        // 双边检测：同时检测到蓝色和黄色锥桶
+        // 目标点取两者中心位置的平均值，作为车道中心
         float avg_blue = static_cast<float>(sum_blue_x) / count_blue;
         float avg_yellow = static_cast<float>(sum_yellow_x) / count_yellow;
         target_x = static_cast<int>((avg_blue + avg_yellow) / 2.0f);
         return true;
     } else if (count_blue > 0) {
         float avg_blue = static_cast<float>(sum_blue_x) / count_blue;
-        // 如果蓝色锥桶在左侧（x < 160），说明车道在右侧，目标点需向右偏移
-        // 如果蓝色锥桶在右侧（x >= 160），说明车道在左侧，目标点需向左偏移
-        if (avg_blue < 160) {
+
+        // 判断蓝色锥桶是否在左侧（相对于车道中心）
+        // 逻辑说明：
+        // - 如果 cone_outer_color == 0（蓝色为外侧边界）且 last_turn_signal == 0（左转/左道），则蓝色在左侧
+        // - 如果 cone_outer_color == 1（黄色为外侧边界）且 last_turn_signal == 1（右转/右道），则蓝色在左侧
+        // 其他情况：蓝色在右侧
+        bool is_blue_left = (cone_outer_color == 0 && last_turn_signal == 0) || 
+                            (cone_outer_color == 1 && last_turn_signal == 1);
+
+        if (is_blue_left) {
+            // 蓝色在左侧：车道中心在蓝色右侧，目标点 = 蓝色位置 + 偏移量
             target_x = static_cast<int>(avg_blue) + CONE_LANE_OFFSET;
         } else {
+            // 蓝色在右侧：车道中心在蓝色左侧，目标点 = 蓝色位置 - 偏移量
             target_x = static_cast<int>(avg_blue) - CONE_LANE_OFFSET;
         }
         
-        // 边界保护
+        // 边界保护：确保目标点在图像范围内
         if (target_x > 320) target_x = 320; 
         if (target_x < 0) target_x = 0;
         return true;
     } else if (count_yellow > 0) {
         float avg_yellow = static_cast<float>(sum_yellow_x) / count_yellow;
-        // 同理判断黄色锥桶位置
-        if (avg_yellow < 160) {
+
+        // 判断黄色锥桶是否在左侧（相对于车道中心）
+        // 逻辑说明：
+        // - 如果 cone_outer_color == 1（黄色为外侧边界）且 last_turn_signal == 0（左转/左道），则黄色在左侧
+        // - 如果 cone_outer_color == 0（蓝色为外侧边界）且 last_turn_signal == 1（右转/右道），则黄色在左侧
+        // 其他情况：黄色在右侧
+        bool is_yellow_left = (cone_outer_color == 1 && last_turn_signal == 0) || 
+                              (cone_outer_color == 0 && last_turn_signal == 1);
+
+        if (is_yellow_left) {
+            // 黄色在左侧：车道中心在黄色右侧，目标点 = 黄色位置 + 偏移量
             target_x = static_cast<int>(avg_yellow) + CONE_LANE_OFFSET;
         } else {
+            // 黄色在右侧：车道中心在黄色左侧，目标点 = 黄色位置 - 偏移量
             target_x = static_cast<int>(avg_yellow) - CONE_LANE_OFFSET;
         }
 
-        // 边界保护
+        // 边界保护：确保目标点在图像范围内
         if (target_x > 320) target_x = 320; 
         if (target_x < 0) target_x = 0;
         return true;
@@ -1723,7 +1749,7 @@ int main(int argc, char* argv[])
                 // 3. 计算目标并更新状态
                 {
                     int target_tmp = 0;
-                    bool cone_found_this_frame = calculate_cone_target(result, target_tmp);
+                    bool cone_found_this_frame = calculate_cone_target(result, target_tmp, cone_outer_color, turn_signal_label);
 
                     if (cone_found_this_frame) {
                         cone_target_x = target_tmp;
