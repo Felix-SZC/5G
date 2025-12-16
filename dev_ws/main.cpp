@@ -96,6 +96,20 @@ void setCarState(CarState newState) {
     if (current_state != newState) {
         std::cout << "[状态变更] " << carStateToString(current_state) 
                   << " -> " << carStateToString(newState) << std::endl;
+        
+        // 状态切换时重置PD控制的last_error，避免误差突变导致车辆摇晃
+        // 只有在切换到需要PD控制的状态时才重置（排除Idle、StartDelay、ZebraStop、BriefStop、ParkingComplete）
+        if (newState == CarState::Cruise || 
+            newState == CarState::Avoidance || 
+            newState == CarState::PostZebra ||
+            newState == CarState::LaneChange ||
+            newState == CarState::ConeGuidance ||
+            newState == CarState::ParkingSearch ||
+            newState == CarState::PreParking) {
+            last_error = 0; // 重置误差历史，避免状态切换时的突变
+            std::cout << "[控制] 已重置PD控制误差历史 (last_error = 0)" << std::endl;
+        }
+        
         current_state = newState;
     }
 }
