@@ -206,7 +206,7 @@ int final_target_label = -1;       // 最终锁定的AB标志的标签（0表示
 
 // 锥桶引导相关
 int cone_outer_color = 0; // 0=蓝色为外侧边界, 1=黄色为外侧边界
-const int CONE_LANE_OFFSET = 80; // 锥桶单侧补全偏移量（像素）
+const int CONE_LANE_OFFSET = 120; // 锥桶单侧补全偏移量（像素）
 const int CONE_ENTER_THRESHOLD = 10; // 确认锥桶出现的帧数阈值
 const int CONE_EXIT_THRESHOLD = 5; // 确认锥桶消失的帧数阈值
 bool has_seen_cones = false; // 是否已确认进入锥桶引导模式
@@ -1041,8 +1041,8 @@ float servo_pd(int target) { // 赛道巡线控制
 
     int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
 
-    float kp = 1.0; // 比例系数
-    float kd = 2.0; // 微分系数
+    float kp = 0.8; // 比例系数
+    float kd = 3.5; // 微分系数
 
     error_first = target - pidx; // 计算误差
 
@@ -1075,8 +1075,8 @@ float servo_pd_bz(int target) { // 避障巡线控制
     int pidx = mid_bz[(int)(mid_bz.size() / 2)].x;
 
     // float kp = 1.5; // 比例系数
-    float kp = 1.5; // 比例系数
-    float kd = 4.0; // 微分系数
+    float kp = 1.0; // 比例系数
+    float kd = 3.5; // 微分系数
 
     error_first = target - pidx; // 计算误差
 
@@ -1128,7 +1128,7 @@ float servo_pd_cone(int target_x) {
     
     // 使用与常规巡线相似的参数
     float kp = 0.8; 
-    float kd = 2.0; 
+    float kd = 3.5; 
 
     error_first = target - pidx; 
 
@@ -1152,8 +1152,8 @@ float servo_pd_parking_cruise(int target) {
     }
     int pidx = int((mid[23].x + mid[25].x) / 2);
 
-    float kp = 1.0; // 比例系数 (低于常规的0.8)
-    float kd = 2.0;  // 微分系数 (低于常规的3.0)
+    float kp = 0.6; // 比例系数 (低于常规的0.8)
+    float kd = 3.5;  // 微分系数 (低于常规的3.0)
 
     error_first = target - pidx;
     servo_pwm_diff = kp * error_first + kd * (error_first - last_error);
@@ -1172,8 +1172,8 @@ float servo_pd_cone_cruise(int target) {
     }
     int pidx = int((mid[23].x + mid[25].x) / 2);
 
-    float kp = 1.0; // 比例系数 (低于常规的0.8)
-    float kd = 2.0;  // 微分系数 (低于常规的3.0)
+    float kp = 0.8; // 比例系数 (低于常规的0.8)
+    float kd = 3.5;  // 微分系数 (低于常规的3.0)
 
     error_first = target - pidx;
     servo_pwm_diff = kp * error_first + kd * (error_first - last_error);
