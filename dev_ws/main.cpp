@@ -37,7 +37,7 @@ const float START_DELAY_SECONDS = 2.0f;              // 发车延时时间（秒
 const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时间（秒）
 const float POST_ZEBRA_DELAY_SECONDS = 1.0f;        // 斑马线后巡线延迟时间（秒）
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
-const float LANE_CHANGE_DURATION_SECONDS = 1.2f;    // 变道持续时间（秒）
+const float LANE_CHANGE_DURATION_SECONDS = 1.5f;    // 变道持续时间（秒）
 const int SERVO_PWM_LEFT_TURN = 780;                // 左转PWM值
 const int SERVO_PWM_RIGHT_TURN = 680;               // 右转PWM值
 const int MOTOR_SPEED_DELTA_LANE_CHANGE = 1300;     // 变道速度增量
@@ -170,6 +170,13 @@ int banma = 0; // 斑马线检测结果
 //----------------变道相关---------------------------------------------------
 
 //----------------避障相关---------------------------------------------------
+enum class AvoidanceDirection {
+    Auto,        // 自动判断: 障碍物在右，向左避；障碍物在左，向右避
+    ForceLeft,   // 强制向左避障
+    ForceRight   // 强制向右避障
+};
+const AvoidanceDirection AVOIDANCE_STRATEGY = AvoidanceDirection::ForceRight; // 在此配置避障策略
+
 int bz_heighest = 0; // 避障高度
 int bz_get = 0;
 std::vector<cv::Point> mid_bz; // 存储中线
@@ -206,8 +213,9 @@ int final_target_label = -1;       // 最终锁定的AB标志的标签（0表示
 
 // 锥桶引导相关
 int cone_outer_color = 0; // 0=蓝色为外侧边界, 1=黄色为外侧边界
-const int CONE_LANE_OFFSET = 120; // 锥桶单侧补全偏移量（像素）
+const int CONE_LANE_OFFSET = 90; // 锥桶单侧补全偏移量（像素）
 const int CONE_ENTER_THRESHOLD = 10; // 确认锥桶出现的帧数阈值
+const int CONE_BOTTOM_Y_THRESHOLD = 120; // 进入锥桶引导的底部高度阈值
 const int CONE_EXIT_THRESHOLD = 5; // 确认锥桶消失的帧数阈值
 bool has_seen_cones = false; // 是否已确认进入锥桶引导模式
 int cones_detect_count = 0; // 锥桶连续检测计数
@@ -1601,9 +1609,28 @@ int main(int argc, char* argv[])
                         bz_heighest = last_known_bz_heighest;
 
                         // 执行第一次补线操作
-                        if (last_known_bz_xcenter > 160) { 
+                        // 根据避障策略决定补线方向
+                        bool avoid_left;
+                        switch (AVOIDANCE_STRATEGY) {
+                            case AvoidanceDirection::ForceLeft:
+                                avoid_left = true;
+                                break;
+                            case AvoidanceDirection::ForceRight:
+                                avoid_left = false;
+                                break;
+                            case AvoidanceDirection::Auto:
+                            default:
+                                // 自动模式：基于障碍物位置判断
+                                avoid_left = (last_known_bz_xcenter > 160); 
+                                break;
+                        }
+
+                        // 执行补线
+                        if (avoid_left) {
+                            // 向左避障: 在障碍物左侧补线，引导车辆向左
                             bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x1, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
-                        } else { 
+                        } else {
+                            // 向右避障: 在障碍物右侧补线，引导车辆向右
                             bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x2, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
                         }
                         Tracking_bz(bin_image); 
@@ -1649,11 +1676,28 @@ int main(int argc, char* argv[])
 
                     // 使用最后记录的障碍物位置进行补线
                     bz_heighest = last_known_bz_heighest;
-                    if (last_known_bz_xcenter > 160) {
-                        // 障碍物在右侧，从障碍物左边界补线到右车道线
+                    // 根据避障策略决定补线方向
+                    bool avoid_left;
+                    switch (AVOIDANCE_STRATEGY) {
+                        case AvoidanceDirection::ForceLeft:
+                            avoid_left = true;
+                            break;
+                        case AvoidanceDirection::ForceRight:
+                            avoid_left = false;
+                            break;
+                        case AvoidanceDirection::Auto:
+                        default:
+                            // 自动模式：基于障碍物位置判断
+                            avoid_left = (last_known_bz_xcenter > 160); 
+                            break;
+                    }
+
+                    // 执行补线
+                    if (avoid_left) {
+                        // 向左避障: 在障碍物左侧补线，引导车辆向左
                         bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x1, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
                     } else {
-                        // 障碍物在左侧，从障碍物右边界补线到左车道线
+                        // 向右避障: 在障碍物右侧补线，引导车辆向右
                         bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x2, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
                     }
                     Tracking_bz(bin_image);
@@ -1753,13 +1797,34 @@ int main(int argc, char* argv[])
                 {
                     int target_tmp = 0;
                     bool cone_found_this_frame = calculate_cone_target(result, target_tmp, cone_outer_color, turn_signal_label);
+                    float max_cone_bottom_y = 0;
+
+                    // 查找最下方锥桶的底部Y坐标
+                    if (cone_found_this_frame) {
+                        for (const auto& obj : result) {
+                            float bottom_y = obj.rect.y + obj.rect.height;
+                            if (bottom_y > max_cone_bottom_y) {
+                                max_cone_bottom_y = bottom_y;
+                            }
+                        }
+                    }
+
+                    // 检查是否满足进入引导模式的条件
+                    bool entry_conditions_met = cone_found_this_frame && (max_cone_bottom_y >= CONE_BOTTOM_Y_THRESHOLD);
 
                     if (cone_found_this_frame) {
                         cone_target_x = target_tmp;
                         cones_lost_count = 0; // 重置丢失计数
                         if (!has_seen_cones) {
-                            cones_detect_count++; // 累加检测计数
-                            cout << "[锥桶搜索] 发现锥桶，计数: " << cones_detect_count << "/" << CONE_ENTER_THRESHOLD << endl;
+                            if(entry_conditions_met) {
+                                cones_detect_count++; // 累加检测计数
+                                cout << "[锥桶搜索] 发现有效锥桶 (高度满足)，计数: " << cones_detect_count << "/" << CONE_ENTER_THRESHOLD << " (y=" << (int)max_cone_bottom_y << ")" << endl;
+                            } else {
+                                if (cones_detect_count > 0) {
+                                    cout << "[锥桶搜索] 锥桶高度不足 (y=" << (int)max_cone_bottom_y << ")，重置计数" << endl;
+                                    cones_detect_count = 0;
+                                }
+                            }
                         }
                     } else {
                         cone_target_x = -1; // 未检测到，使用后备巡线
