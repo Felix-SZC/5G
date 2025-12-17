@@ -72,6 +72,9 @@ enum class CarState {
 
 CarState current_state = CarState::Idle;
 
+//---------------舵机和电机相关（提前声明，供setCarState使用）---------------------------------------------
+int last_error = 0; // 存储上一次误差（初始化为0）
+
 // 功能: 将CarState枚举转换为可读字符串
 std::string carStateToString(CarState state) {
     switch (state) {
@@ -154,7 +157,7 @@ std::vector<cv::Point> right_line; // 存储右线条
 
 //---------------舵机和电机相关---------------------------------------------
 int error_first; // 存储第一次误差
-int last_error; // 存储上一次误差
+// last_error 已在前面声明
 float servo_pwm_diff; // 存储舵机PWM差值
 float servo_pwm; // 存储舵机PWM值
 
