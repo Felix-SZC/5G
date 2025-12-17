@@ -24,6 +24,14 @@ using namespace cv; // 使用OpenCV命名空间
 
 bool program_finished = false; // 控制主循环退出的标志
 
+//---------------调试选项-------------------------------------------------
+const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
+const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，减轻imshow开销
+
+//---------------性能统计---------------------------------------------------
+int number = 0; // 已处理帧计数
+bool SHOW_FPS = false; // 是否显示FPS信息，可通过命令行参数控制
+
 //------------速度参数配置------------------------------------------------------------------------------------------
 const int MOTOR_SPEED_DELTA_CRUISE = 1300; // 常规巡航速度增量
 const int MOTOR_SPEED_DELTA_AVOID = 1100;  // 避障阶段速度增量
@@ -41,14 +49,6 @@ const float LANE_CHANGE_DURATION_SECONDS = 1.5f;    // 变道持续时间（秒�
 const int SERVO_PWM_LEFT_TURN = 780;                // 左转PWM值
 const int SERVO_PWM_RIGHT_TURN = 680;               // 右转PWM值
 const int MOTOR_SPEED_DELTA_LANE_CHANGE = 1300;     // 变道速度增量
-
-//---------------调试选项-------------------------------------------------
-const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
-const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，减轻imshow开销
-
-//---------------性能统计---------------------------------------------------
-int number = 0; // 已处理帧计数
-bool SHOW_FPS = false; // 是否显示FPS信息，可通过命令行参数控制
 
 //------------有关的全局变量定义------------------------------------------------------------------------------------------
 
@@ -143,31 +143,47 @@ FastestDet* fastestdet_obs = nullptr;
 FastestDet* fastestdet_lr = nullptr;
 FastestDet* fastestdet_ab = nullptr;
 
-//-----------------图像相关----------------------------------------------
+//-----------------图像处理与保存----------------------------------------------
 Mat frame; // 存储视频帧
 Mat bin_image; // 存储二值化图像--Sobel检测后图像
-
-// 图像处理参数
+std::chrono::steady_clock::time_point last_save_time; // 上次保存图像的时间
+const int SAVE_INTERVAL_SECONDS = 30; // 保存间隔（秒）
+const std::string SAVE_DIR = "captured_images"; // 保存目录
 const int MIN_COMPONENT_AREA = 400; // 连通区域最小面积阈值（用于过滤噪声）
+
+//---------------蓝色挡板发车相关----------------------------------------------
+int find_first = 0; // 标记是否第一次找到蓝色挡板
+int blue_detect_count = 0; // 蓝色挡板连续检测计数
+const int BLUE_DETECT_THRESHOLD = 5; // 需要连续检测到的帧数才能确认找到蓝色挡板
+
+// HSV颜色范围
+const int BLUE_H_MIN = 100;  // 色调H最小值
+const int BLUE_H_MAX = 130;  // 色调H最大值
+const int BLUE_S_MIN = 50;   // 饱和度S最小值
+const int BLUE_S_MAX = 255;  // 饱和度S最大值
+const int BLUE_V_MIN = 50;   // 亮度V最小值
+const int BLUE_V_MAX = 255;  // 亮度V最大值
+
+// 蓝色检测ROI区域（限制检测范围）
+const int BLUE_ROI_X = 90;      // ROI左上角X坐标
+const int BLUE_ROI_Y = 80;      // ROI左上角Y坐标
+const int BLUE_ROI_WIDTH = 220;  // ROI宽度
+const int BLUE_ROI_HEIGHT = 100; // ROI高度
+
+const double BLUE_AREA_VALID = 2000.0; // 有效面积阈值
+const double BLUE_REMOVE_AREA_MIN = 500.0; // 移开检测的最小面积阈值（过滤小噪点）
+std::chrono::steady_clock::time_point start_delay_time; // 挡板移开时间戳
 
 //-----------------巡线相关-----------------------------------------------
 std::vector<cv::Point> mid; // 存储中线
 std::vector<cv::Point> left_line; // 存储左线条
 std::vector<cv::Point> right_line; // 存储右线条
+std::vector<cv::Point> last_mid; // 存储上一次的中线，用于平滑滤波
 
-//---------------舵机和电机相关---------------------------------------------
 int error_first; // 存储第一次误差
 // last_error 已在前面声明
 float servo_pwm_diff; // 存储舵机PWM差值
 float servo_pwm; // 存储舵机PWM值
-
-//---------------发车信号定义-----------------------------------------------
-int find_first = 0; // 标记是否第一次找到蓝色挡板
-
-//---------------斑马线相关-------------------------------------------------
-int banma = 0; // 斑马线检测结果
-
-//----------------变道相关---------------------------------------------------
 
 //----------------避障相关---------------------------------------------------
 enum class AvoidanceDirection {
@@ -197,105 +213,8 @@ const int BZ_Y_LOWER_THRESHOLD = 40; // 触发避障的Y轴下限阈值 (下限)
 int bz_detect_count = 0; // 障碍物连续检测计数
 const int BZ_DETECT_THRESHOLD = 3; // 确认障碍物出现的帧数阈值
 
-//----------------停车相关---------------------------------------------------
-int flag_turn_done = 0; // 转向完成标志
-std::chrono::steady_clock::time_point zebra_stop_start_time;
-std::chrono::steady_clock::time_point post_zebra_delay_start_time; // 斑马线后延迟计时器
-std::chrono::steady_clock::time_point lane_change_start_time;      // 变道计时器
-int turn_signal_label = -1;                                        // 转向标志 (0=left, 1=right)
-int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
-int park_A_count = 0; // A车库累计识别次数
-int park_B_count = 0; // B车库累计识别次数
-int turn_left_count = 0;    // 斑马线左转累计识别次数
-int turn_right_count = 0;   // 斑马线右转累计识别次数
-const int PARKING_Y_THRESHOLD = 120; // 触发入库的Y轴阈值
-int final_target_label = -1;       // 最终锁定的AB标志的标签（0表示A，1表示B）
-
-// 锥桶引导相关
-int cone_outer_color = 0; // 0=蓝色为外侧边界, 1=黄色为外侧边界
-const int CONE_LANE_OFFSET = 90; // 锥桶单侧补全偏移量（像素）
-const int CONE_ENTER_THRESHOLD = 10; // 确认锥桶出现的帧数阈值
-const int CONE_BOTTOM_Y_THRESHOLD = 120; // 进入锥桶引导的底部高度阈值
-const int CONE_EXIT_THRESHOLD = 5; // 确认锥桶消失的帧数阈值
-bool has_seen_cones = false; // 是否已确认进入锥桶引导模式
-int cones_detect_count = 0; // 锥桶连续检测计数
-int cones_lost_count = 0; // 锥桶连续丢失计数
-int cone_target_x = -1; // 锥桶引导目标点X坐标（-1表示未检测到）
-
-// 发车延时相关：挡板移开后等待指定时间再开始电机/舵机控制
-std::chrono::steady_clock::time_point start_delay_time; // 挡板移开时间戳
-
-//----------------图像保存相关---------------------------------------------------
-std::chrono::steady_clock::time_point last_save_time; // 上次保存图像的时间
-const int SAVE_INTERVAL_SECONDS = 30; // 保存间隔（秒）
-const std::string SAVE_DIR = "captured_images"; // 保存目录
-
-// 定义舵机和电机引脚号、PWM范围、PWM频率、PWM占空比解锁值
-const int servo_pin = 12; // 存储舵机引脚号
-const float servo_pwm_range = 10000.0; // 存储舵机PWM范围
-const float servo_pwm_frequency = 50.0; // 存储舵机PWM频率
-const float servo_pwm_duty_cycle_unlock = 730.0; // 存储舵机PWM占空比解锁值
-
-//---------------------------------------------------------------------------------------------------
-float servo_pwm_mid = servo_pwm_duty_cycle_unlock; // 存储舵机中值
-//---------------------------------------------------------------------------------------------------
-
-const int motor_pin = 13; // 存储电机引脚号
-const float motor_pwm_range = 40000.0; // 存储电机PWM范围
-const float motor_pwm_frequency = 200.0; // 存储电机PWM频率
-const float motor_pwm_duty_cycle_unlock = 11400.0; // 存储电机PWM占空比解锁值
-
-//--------------------------------------------------------------------------------------------------
-float motor_pwm_mid = motor_pwm_duty_cycle_unlock; // 存储电机PWM初始化值
-//--------------------------------------------------------------------------------------------------
-
-const int yuntai_LR_pin = 22; // 存储云台引脚号
-const float yuntai_LR_pwm_range = 1000.0; // 存储云台PWM范围
-const float yuntai_LR_pwm_frequency = 50.0; // 存储云台PWM频率
-const float yuntai_LR_pwm_duty_cycle_unlock = 63.0; //大左小右 
-
-const int yuntai_UD_pin = 23; // 存储云台引脚号
-const float yuntai_UD_pwm_range = 1000.0; // 存储云台PWM范围
-const float yuntai_UD_pwm_frequency = 50.0; // 存储云台PWM频率
-const float yuntai_UD_pwm_duty_cycle_unlock = 55.0; //大上下小
-
-//---------------平滑滤波相关-------------------------------------------------
-std::vector<cv::Point> last_mid; // 存储上一次的中线，用于平滑滤波
-int blue_detect_count = 0; // 蓝色挡板连续检测计数
-const int BLUE_DETECT_THRESHOLD = 5; // 需要连续检测到的帧数才能确认找到蓝色挡板
-
-// 预入库阶段参数
-std::chrono::steady_clock::time_point pre_parking_start_time; // 预入库阶段开始时间
-const int PARKING_DETECT_MISS_THRESHOLD = 5; // 检测不到的帧数阈值，达到后停车
-
-// 预入库阶段跟随目标相关
-int parking_target_not_detected_count = 0; // 连续检测不到目标的帧数
-int parking_follow_x = 160; // 当前跟随目标的x坐标（默认中心）
-bool parking_target_detected_this_frame = false; // 当前帧是否检测到目标
-
-
-//---------------蓝色检测参数------------------------------------------
-// HSV颜色范围
-const int BLUE_H_MIN = 100;  // 色调H最小值
-const int BLUE_H_MAX = 130;  // 色调H最大值
-const int BLUE_S_MIN = 50;   // 饱和度S最小值
-const int BLUE_S_MAX = 255;  // 饱和度S最大值
-const int BLUE_V_MIN = 50;   // 亮度V最小值
-const int BLUE_V_MAX = 255;  // 亮度V最大值
-
-// 蓝色检测ROI区域（限制检测范围）
-const int BLUE_ROI_X = 90;      // ROI左上角X坐标
-const int BLUE_ROI_Y = 80;      // ROI左上角Y坐标
-const int BLUE_ROI_WIDTH = 220;  // ROI宽度
-const int BLUE_ROI_HEIGHT = 100; // ROI高度
-
-// 蓝色面积阈值
-const double BLUE_AREA_VALID = 2000.0; // 有效面积阈值
-
-// 蓝色挡板移开检测参数
-const double BLUE_REMOVE_AREA_MIN = 500.0; // 移开检测的最小面积阈值（过滤小噪点）
-
-//---------------斑马线检测参数（可调节）------------------------------------------
+//---------------斑马线检测相关------------------------------------------
+int banma = 0; // 斑马线检测结果
 // 斑马线检测ROI区域
 const int BANMA_ROI_X = 10;           // ROI左上角X坐标
 const int BANMA_ROI_Y = 130;          // ROI左上角Y坐标 (下移)
@@ -308,10 +227,68 @@ const int BANMA_RECT_MAX_WIDTH = 100;  // 矩形最大宽度
 const int BANMA_RECT_MIN_HEIGHT = 15;   // 矩形最小高度
 const int BANMA_RECT_MAX_HEIGHT = 100;  // 矩形最大高度 (调低以排除车道线)
 
-// 判定为斑马线需要的最少白色矩形数量 (根据实际情况调整)
-const int BANMA_MIN_COUNT = 4;
 
-//--------------------------------------------------------------------------
+const int BANMA_MIN_COUNT = 4;  // 判定为斑马线需要的最少白色矩形数量 
+
+//----------------变道相关---------------------------------------------------
+int flag_turn_done = 0; // 转向完成标志
+std::chrono::steady_clock::time_point zebra_stop_start_time;
+std::chrono::steady_clock::time_point post_zebra_delay_start_time; // 斑马线后延迟计时器
+std::chrono::steady_clock::time_point lane_change_start_time;      // 变道计时器
+int turn_signal_label = -1;                                        // 转向标志 (0=left, 1=right)
+
+// ----------------锥桶引导相关---------------------------------------------------
+int cone_outer_color = 0; // 0=蓝色为外侧边界, 1=黄色为外侧边界
+const int CONE_LANE_OFFSET = 90; // 锥桶单侧补全偏移量（像素）
+const int CONE_ENTER_THRESHOLD = 10; // 确认锥桶出现的帧数阈值
+const int CONE_BOTTOM_Y_THRESHOLD = 120; // 进入锥桶引导的底部高度阈值
+const int CONE_EXIT_THRESHOLD = 5; // 确认锥桶消失的帧数阈值
+bool has_seen_cones = false; // 是否已确认进入锥桶引导模式
+int cones_detect_count = 0; // 锥桶连续检测计数
+int cones_lost_count = 0; // 锥桶连续丢失计数
+int cone_target_x = -1; // 锥桶引导目标点X坐标（-1表示未检测到）
+
+//---------------入库相关------------------------------------------
+int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
+int park_A_count = 0; // A车库累计识别次数
+int park_B_count = 0; // B车库累计识别次数
+int turn_left_count = 0;    // 斑马线左转累计识别次数
+int turn_right_count = 0;   // 斑马线右转累计识别次数
+const int PARKING_Y_THRESHOLD = 120; // 触发入库的Y轴阈值
+int final_target_label = -1;       // 最终锁定的AB标志的标签（0表示A，1表示B）
+std::chrono::steady_clock::time_point pre_parking_start_time; // 预入库阶段开始时间
+const int PARKING_DETECT_MISS_THRESHOLD = 5; // 检测不到的帧数阈值，达到后停车
+
+int parking_target_not_detected_count = 0; // 连续检测不到目标的帧数
+int parking_follow_x = 160; // 当前跟随目标的x坐标（默认中心）
+bool parking_target_detected_this_frame = false; // 当前帧是否检测到目标
+
+//---------------舵机相关---------------------------------------------
+const int servo_pin = 12; // 存储舵机引脚号
+const float servo_pwm_range = 10000.0; // 存储舵机PWM范围
+const float servo_pwm_frequency = 50.0; // 存储舵机PWM频率
+const float servo_pwm_duty_cycle_unlock = 730.0; // 存储舵机PWM占空比解锁值
+
+float servo_pwm_mid = servo_pwm_duty_cycle_unlock; // 存储舵机中值
+
+//---------------电机相关---------------------------------------------
+const int motor_pin = 13; // 存储电机引脚号
+const float motor_pwm_range = 40000.0; // 存储电机PWM范围
+const float motor_pwm_frequency = 200.0; // 存储电机PWM频率
+const float motor_pwm_duty_cycle_unlock = 11400.0; // 存储电机PWM占空比解锁值
+
+float motor_pwm_mid = motor_pwm_duty_cycle_unlock; // 存储电机PWM初始化值
+
+//---------------云台相关---------------------------------------------
+const int yuntai_LR_pin = 22; // 存储云台引脚号
+const float yuntai_LR_pwm_range = 1000.0; // 存储云台PWM范围
+const float yuntai_LR_pwm_frequency = 50.0; // 存储云台PWM频率
+const float yuntai_LR_pwm_duty_cycle_unlock = 63.0; //大左小右 
+
+const int yuntai_UD_pin = 23; // 存储云台引脚号
+const float yuntai_UD_pwm_range = 1000.0; // 存储云台PWM范围
+const float yuntai_UD_pwm_frequency = 50.0; // 存储云台PWM频率
+const float yuntai_UD_pwm_duty_cycle_unlock = 55.0; //大上下小
 
 // 功能: 初始化舵机、电机与云台PWM，完成GPIO库初始化
 void servo_motor_pwmInit(void) 
