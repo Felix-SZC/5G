@@ -45,9 +45,9 @@ const float START_DELAY_SECONDS = 2.0f;              // 发车延时时间（秒
 const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时间（秒）
 const float POST_ZEBRA_DELAY_SECONDS = 1.0f;        // 斑马线后巡线延迟时间（秒）
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
-const float LANE_CHANGE_DURATION_SECONDS = 1.5f;    // 变道持续时间（秒）
-const int SERVO_PWM_LEFT_TURN = 780;                // 左转PWM值
-const int SERVO_PWM_RIGHT_TURN = 680;               // 右转PWM值
+const float LANE_CHANGE_DURATION_SECONDS = 1.8f;    // 变道持续时间（秒）
+const int SERVO_PWM_LEFT_TURN = 760;                // 左转PWM值
+const int SERVO_PWM_RIGHT_TURN = 690;               // 右转PWM值
 const int MOTOR_SPEED_DELTA_LANE_CHANGE = 1300;     // 变道速度增量
 
 //------------有关的全局变量定义------------------------------------------------------------------------------------------
@@ -75,15 +75,6 @@ CarState current_state = CarState::Idle;
 //---------------舵机和电机相关（提前声明，供setCarState使用）---------------------------------------------
 int last_error = 0; // 存储上一次误差（初始化为0）
 
-//---------------PD控制器滤波相关---------------------------------------------
-// 一阶低通滤波系数（0.0-1.0，值越小滤波越强，响应越慢但更平滑）
-const float FILTER_ALPHA = 0.3f; // 默认滤波系数，平衡响应速度和平滑度
-float filtered_servo_pwm = 730.0f; // 常规巡线PD控制器滤波后的PWM值
-float filtered_servo_pwm_bz = 730.0f; // 避障巡线PD控制器滤波后的PWM值
-float filtered_servo_pwm_parking = 730.0f; // 预入库PD控制器滤波后的PWM值
-float filtered_servo_pwm_cone = 730.0f; // 锥桶引导PD控制器滤波后的PWM值
-float filtered_servo_pwm_parking_cruise = 730.0f; // 寻找车库巡线PD控制器滤波后的PWM值
-float filtered_servo_pwm_cone_cruise = 730.0f; // 锥桶引导后备巡线PD控制器滤波后的PWM值
 
 // 功能: 将CarState枚举转换为可读字符串
 std::string carStateToString(CarState state) {
@@ -110,7 +101,7 @@ void setCarState(CarState newState) {
         std::cout << "[状态变更] " << carStateToString(current_state) 
                   << " -> " << carStateToString(newState) << std::endl;
         
-        // 状态切换时重置PD控制的last_error和滤波状态，避免误差突变导致车辆摇晃
+        // 状态切换时重置PD控制的last_error，避免误差突变导致车辆摇晃
         // 只有在切换到需要PD控制的状态时才重置（排除Idle、StartDelay、ZebraStop、BriefStop、ParkingComplete）
         if (newState == CarState::Cruise || 
             newState == CarState::Avoidance || 
@@ -120,14 +111,7 @@ void setCarState(CarState newState) {
             newState == CarState::ParkingSearch ||
             newState == CarState::PreParking) {
             last_error = 0; // 重置误差历史，避免状态切换时的突变
-            // 重置所有滤波状态，避免状态切换时的PWM突变（使用常量值730.0，等同于servo_pwm_mid）
-            filtered_servo_pwm = 730.0f;
-            filtered_servo_pwm_bz = 730.0f;
-            filtered_servo_pwm_parking = 730.0f;
-            filtered_servo_pwm_cone = 730.0f;
-            filtered_servo_pwm_parking_cruise = 730.0f;
-            filtered_servo_pwm_cone_cruise = 730.0f;
-            std::cout << "[控制] 已重置PD控制误差历史和滤波状态" << std::endl;
+            std::cout << "[控制] 已重置PD控制误差历史" << std::endl;
         }
         
         current_state = newState;
@@ -208,7 +192,7 @@ enum class AvoidanceDirection {
     ForceLeft,   // 强制向左避障
     ForceRight   // 强制向右避障
 };
-const AvoidanceDirection AVOIDANCE_STRATEGY = AvoidanceDirection::ForceRight; // 在此配置避障策略
+const AvoidanceDirection AVOIDANCE_STRATEGY = AvoidanceDirection::Auto; // 在此配置避障策略
 
 int bz_heighest = 0; // 避障高度
 int bz_get = 0;
@@ -256,7 +240,7 @@ int turn_signal_label = -1;                                        // 转向标�
 
 // ----------------锥桶引导相关---------------------------------------------------
 int cone_outer_color = 1; // 0=蓝色为外侧边界, 1=黄色为外侧边界
-const int CONE_LANE_OFFSET = 100; // 锥桶单侧补全偏移量（像素）
+const int CONE_LANE_OFFSET = 30; // 锥桶单侧补全偏移量（像素）
 const int CONE_ENTER_THRESHOLD = 10; // 确认锥桶出现的帧数阈值
 const int CONE_BOTTOM_Y_THRESHOLD = 120; // 进入锥桶引导的底部高度阈值
 const int CONE_EXIT_THRESHOLD = 5; // 确认锥桶消失的帧数阈值
@@ -451,7 +435,7 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
     
     // 组合梯度，权重偏向Y方向
     cv::Mat gradientMagnitude8U;
-    cv::addWeighted(absSobelY, 1.0, absSobelX, 0.5, 0, gradientMagnitude8U);
+    cv::addWeighted(absSobelY, 1.0, absSobelX, 1.0, 0, gradientMagnitude8U);
 
     // 顶帽操作减弱阴影
     cv::Mat topHat;
@@ -1038,14 +1022,13 @@ float servo_pd(int target) { // 赛道巡线控制
     // 安全检查：确保mid向量有足够的元素
     if (mid.size() < 26) {
         cerr << "[警告] servo_pd: mid向量元素不足 (" << mid.size() << " < 26)，返回中值" << endl;
-        filtered_servo_pwm = servo_pwm_mid; // 重置滤波状态
         return servo_pwm_mid;
     }
 
     int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
 
     float kp = 0.8; // 比例系数
-    float kd = 2.0; // 微分系数
+    float kd = 3.5; // 微分系数
 
     error_first = target - pidx; // 计算误差
 
@@ -1064,10 +1047,7 @@ float servo_pd(int target) { // 赛道巡线控制
         servo_pwm = 580; // 限制PWM值为600
     }
     
-    // 应用一阶低通滤波，使控制更平滑
-    filtered_servo_pwm = FILTER_ALPHA * servo_pwm + (1.0f - FILTER_ALPHA) * filtered_servo_pwm;
-    
-    return filtered_servo_pwm; // 返回滤波后的舵机PWM值
+    return servo_pwm; // 返回舵机PWM值
 }
 
 // 功能: 避障巡线PD控制器，权重更大，响应更快
@@ -1076,15 +1056,14 @@ float servo_pd_bz(int target) { // 避障巡线控制
     // 安全检查：确保mid_bz向量不为空
     if (mid_bz.empty()) {
         cerr << "[警告] servo_pd_bz: mid_bz向量为空，返回中值" << endl;
-        filtered_servo_pwm_bz = servo_pwm_mid; // 重置滤波状态
         return servo_pwm_mid;
     }
 
     int pidx = mid_bz[(int)(mid_bz.size() / 2)].x;
 
     // float kp = 1.5; // 比例系数
-    float kp = 1.2; // 比例系数
-    float kd = 3.0; // 微分系数
+    float kp = 2.0; // 比例系数
+    float kd = 4.0; // 微分系数
 
     error_first = target - pidx; // 计算误差
 
@@ -1101,10 +1080,7 @@ float servo_pd_bz(int target) { // 避障巡线控制
         servo_pwm = 600; // 限制PWM值为600
     }
     
-    // 应用一阶低通滤波，使控制更平滑
-    filtered_servo_pwm_bz = FILTER_ALPHA * servo_pwm + (1.0f - FILTER_ALPHA) * filtered_servo_pwm_bz;
-    
-    return filtered_servo_pwm_bz; // 返回滤波后的舵机PWM值
+    return servo_pwm; // 返回舵机PWM值
 }
 
 // 功能: 预入库阶段跟随AB目标的PD控制器，P和D参数较大，响应更灵敏
@@ -1125,10 +1101,7 @@ float servo_pd_parking(int ab_center_x) { // 跟随AB目标控制，ab_center_x�
 
     servo_pwm = servo_pwm_mid + servo_pwm_diff; // 计算舵机PWM值
 
-    // 应用一阶低通滤波，使控制更平滑
-    filtered_servo_pwm_parking = FILTER_ALPHA * servo_pwm + (1.0f - FILTER_ALPHA) * filtered_servo_pwm_parking;
-
-    return filtered_servo_pwm_parking; // 返回滤波后的舵机PWM值
+    return servo_pwm; // 返回舵机PWM值
 }
 
 
@@ -1157,41 +1130,12 @@ float servo_pd_cone(int target_x) {
     if (servo_pwm > 1000) servo_pwm = 1000;
     else if (servo_pwm < 580) servo_pwm = 580;
     
-    // 应用一阶低通滤波，使控制更平滑
-    filtered_servo_pwm_cone = FILTER_ALPHA * servo_pwm + (1.0f - FILTER_ALPHA) * filtered_servo_pwm_cone;
-    
-    return filtered_servo_pwm_cone; 
+    return servo_pwm; 
 }
 
 // 功能: 寻找车库阶段的巡线PD控制器（参数更平缓以适应低帧率）
 float servo_pd_parking_cruise(int target) { 
     if (mid.size() < 26) {
-        filtered_servo_pwm_parking_cruise = servo_pwm_mid; // 重置滤波状态
-        return servo_pwm_mid;
-    }
-    int pidx = int((mid[23].x + mid[25].x) / 2);
-
-    float kp = 0.6; 
-    float kd = 3.5; 
-
-    error_first = target - pidx;
-    servo_pwm_diff = kp * error_first + kd * (error_first - last_error);
-    last_error = error_first;
-    servo_pwm = servo_pwm_mid + servo_pwm_diff;
-
-    if (servo_pwm > 1000) servo_pwm = 1000;
-    else if (servo_pwm < 580) servo_pwm = 580;
-    
-    // 应用一阶低通滤波，使控制更平滑
-    filtered_servo_pwm_parking_cruise = FILTER_ALPHA * servo_pwm + (1.0f - FILTER_ALPHA) * filtered_servo_pwm_parking_cruise;
-    
-    return filtered_servo_pwm_parking_cruise;
-}
-
-// 功能: 锥桶引导阶段的后备巡线PD控制器（参数更平缓以适应低帧率）
-float servo_pd_cone_cruise(int target) { 
-    if (mid.size() < 26) {
-        filtered_servo_pwm_cone_cruise = servo_pwm_mid; // 重置滤波状态
         return servo_pwm_mid;
     }
     int pidx = int((mid[23].x + mid[25].x) / 2);
@@ -1207,10 +1151,28 @@ float servo_pd_cone_cruise(int target) {
     if (servo_pwm > 1000) servo_pwm = 1000;
     else if (servo_pwm < 580) servo_pwm = 580;
     
-    // 应用一阶低通滤波，使控制更平滑
-    filtered_servo_pwm_cone_cruise = FILTER_ALPHA * servo_pwm + (1.0f - FILTER_ALPHA) * filtered_servo_pwm_cone_cruise;
+    return servo_pwm;
+}
+
+// 功能: 锥桶引导阶段的后备巡线PD控制器（参数更平缓以适应低帧率）
+float servo_pd_cone_cruise(int target) { 
+    if (mid.size() < 26) {
+        return servo_pwm_mid;
+    }
+    int pidx = int((mid[23].x + mid[25].x) / 2);
+
+    float kp = 0.8; 
+    float kd = 3.5; 
+
+    error_first = target - pidx;
+    servo_pwm_diff = kp * error_first + kd * (error_first - last_error);
+    last_error = error_first;
+    servo_pwm = servo_pwm_mid + servo_pwm_diff;
+
+    if (servo_pwm > 1000) servo_pwm = 1000;
+    else if (servo_pwm < 580) servo_pwm = 580;
     
-    return filtered_servo_pwm_cone_cruise;
+    return servo_pwm;
 }
 
 
@@ -1424,7 +1386,7 @@ int main(int argc, char* argv[])
     // 初始化检测模型
     cout << "[初始化] 加载障碍物检测模型..." << endl;
     try {
-        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.4f, 0.4f, 4, false);
+        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.5f, 0.5f, 4, false);
         cout << "[初始化] 障碍物检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 障碍物检测模型加载失败: " << e.what() << endl;
