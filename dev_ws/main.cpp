@@ -25,7 +25,7 @@ using namespace cv; // 使用OpenCV命名空间
 bool program_finished = false; // 控制主循环退出的标志
 
 //---------------调试选项-------------------------------------------------
-const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
+const bool SHOW_SOBEL_DEBUG = true; // 是否显示Sobel调试窗口
 const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，减轻imshow开销
 
 //---------------性能统计---------------------------------------------------
@@ -75,6 +75,16 @@ CarState current_state = CarState::Idle;
 //---------------舵机和电机相关（提前声明，供setCarState使用）---------------------------------------------
 int last_error = 0; // 存储上一次误差（初始化为0）
 
+//---------------PD控制器滤波相关---------------------------------------------
+// 一阶低通滤波系数（0.0-1.0，值越小滤波越强，响应越慢但更平滑）
+const float FILTER_ALPHA = 0.3f; // 默认滤波系数，平衡响应速度和平滑度
+float filtered_servo_pwm = 730.0f; // 常规巡线PD控制器滤波后的PWM值
+float filtered_servo_pwm_bz = 730.0f; // 避障巡线PD控制器滤波后的PWM值
+float filtered_servo_pwm_parking = 730.0f; // 预入库PD控制器滤波后的PWM值
+float filtered_servo_pwm_cone = 730.0f; // 锥桶引导PD控制器滤波后的PWM值
+float filtered_servo_pwm_parking_cruise = 730.0f; // 寻找车库巡线PD控制器滤波后的PWM值
+float filtered_servo_pwm_cone_cruise = 730.0f; // 锥桶引导后备巡线PD控制器滤波后的PWM值
+
 // 功能: 将CarState枚举转换为可读字符串
 std::string carStateToString(CarState state) {
     switch (state) {
@@ -100,7 +110,7 @@ void setCarState(CarState newState) {
         std::cout << "[状态变更] " << carStateToString(current_state) 
                   << " -> " << carStateToString(newState) << std::endl;
         
-        // 状态切换时重置PD控制的last_error，避免误差突变导致车辆摇晃
+        // 状态切换时重置PD控制的last_error和滤波状态，避免误差突变导致车辆摇晃
         // 只有在切换到需要PD控制的状态时才重置（排除Idle、StartDelay、ZebraStop、BriefStop、ParkingComplete）
         if (newState == CarState::Cruise || 
             newState == CarState::Avoidance || 
@@ -110,7 +120,14 @@ void setCarState(CarState newState) {
             newState == CarState::ParkingSearch ||
             newState == CarState::PreParking) {
             last_error = 0; // 重置误差历史，避免状态切换时的突变
-            std::cout << "[控制] 已重置PD控制误差历史 (last_error = 0)" << std::endl;
+            // 重置所有滤波状态，避免状态切换时的PWM突变（使用常量值730.0，等同于servo_pwm_mid）
+            filtered_servo_pwm = 730.0f;
+            filtered_servo_pwm_bz = 730.0f;
+            filtered_servo_pwm_parking = 730.0f;
+            filtered_servo_pwm_cone = 730.0f;
+            filtered_servo_pwm_parking_cruise = 730.0f;
+            filtered_servo_pwm_cone_cruise = 730.0f;
+            std::cout << "[控制] 已重置PD控制误差历史和滤波状态" << std::endl;
         }
         
         current_state = newState;
@@ -238,7 +255,7 @@ std::chrono::steady_clock::time_point lane_change_start_time;      // 变道计�
 int turn_signal_label = -1;                                        // 转向标志 (0=left, 1=right)
 
 // ----------------锥桶引导相关---------------------------------------------------
-int cone_outer_color = 0; // 0=蓝色为外侧边界, 1=黄色为外侧边界
+int cone_outer_color = 1; // 0=蓝色为外侧边界, 1=黄色为外侧边界
 const int CONE_LANE_OFFSET = 90; // 锥桶单侧补全偏移量（像素）
 const int CONE_ENTER_THRESHOLD = 10; // 确认锥桶出现的帧数阈值
 const int CONE_BOTTOM_Y_THRESHOLD = 120; // 进入锥桶引导的底部高度阈值
@@ -445,7 +462,7 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
     cv::threshold(topHat, adaptiveMask, 10, 255, cv::THRESH_BINARY);
 
     cv::Mat gradientMask;
-    cv::threshold(gradientMagnitude8U, gradientMask, 30, 255, cv::THRESH_BINARY); // 梯度二值掩码
+    cv::threshold(gradientMagnitude8U, gradientMask, 50, 255, cv::THRESH_BINARY); // 梯度二值掩码
     static cv::Mat kernel_gradient_dilate = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
     cv::dilate(gradientMask, gradientMask, kernel_gradient_dilate);
 
@@ -473,7 +490,7 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
     }
 
     std::vector<cv::Vec4i> lines;
-    cv::HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 20, 15, 8);
+    cv::HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 10, 15, 8);
 
     cv::Mat finalImage = cv::Mat::zeros(targetSize, CV_8U);
     cv::Mat overlayImage;
@@ -1021,6 +1038,7 @@ float servo_pd(int target) { // 赛道巡线控制
     // 安全检查：确保mid向量有足够的元素
     if (mid.size() < 26) {
         cerr << "[警告] servo_pd: mid向量元素不足 (" << mid.size() << " < 26)，返回中值" << endl;
+        filtered_servo_pwm = servo_pwm_mid; // 重置滤波状态
         return servo_pwm_mid;
     }
 
@@ -1045,7 +1063,11 @@ float servo_pd(int target) { // 赛道巡线控制
     {
         servo_pwm = 580; // 限制PWM值为600
     }
-    return servo_pwm; // 返回舵机PWM值
+    
+    // 应用一阶低通滤波，使控制更平滑
+    filtered_servo_pwm = FILTER_ALPHA * servo_pwm + (1.0f - FILTER_ALPHA) * filtered_servo_pwm;
+    
+    return filtered_servo_pwm; // 返回滤波后的舵机PWM值
 }
 
 // 功能: 避障巡线PD控制器，权重更大，响应更快
@@ -1054,6 +1076,7 @@ float servo_pd_bz(int target) { // 避障巡线控制
     // 安全检查：确保mid_bz向量不为空
     if (mid_bz.empty()) {
         cerr << "[警告] servo_pd_bz: mid_bz向量为空，返回中值" << endl;
+        filtered_servo_pwm_bz = servo_pwm_mid; // 重置滤波状态
         return servo_pwm_mid;
     }
 
@@ -1077,7 +1100,11 @@ float servo_pd_bz(int target) { // 避障巡线控制
     {
         servo_pwm = 600; // 限制PWM值为600
     }
-    return servo_pwm; // 返回舵机PWM值
+    
+    // 应用一阶低通滤波，使控制更平滑
+    filtered_servo_pwm_bz = FILTER_ALPHA * servo_pwm + (1.0f - FILTER_ALPHA) * filtered_servo_pwm_bz;
+    
+    return filtered_servo_pwm_bz; // 返回滤波后的舵机PWM值
 }
 
 // 功能: 预入库阶段跟随AB目标的PD控制器，P和D参数较大，响应更灵敏
@@ -1098,7 +1125,10 @@ float servo_pd_parking(int ab_center_x) { // 跟随AB目标控制，ab_center_x�
 
     servo_pwm = servo_pwm_mid + servo_pwm_diff; // 计算舵机PWM值
 
-    return servo_pwm; // 返回舵机PWM值
+    // 应用一阶低通滤波，使控制更平滑
+    filtered_servo_pwm_parking = FILTER_ALPHA * servo_pwm + (1.0f - FILTER_ALPHA) * filtered_servo_pwm_parking;
+
+    return filtered_servo_pwm_parking; // 返回滤波后的舵机PWM值
 }
 
 
@@ -1127,12 +1157,16 @@ float servo_pd_cone(int target_x) {
     if (servo_pwm > 1000) servo_pwm = 1000;
     else if (servo_pwm < 580) servo_pwm = 580;
     
-    return servo_pwm; 
+    // 应用一阶低通滤波，使控制更平滑
+    filtered_servo_pwm_cone = FILTER_ALPHA * servo_pwm + (1.0f - FILTER_ALPHA) * filtered_servo_pwm_cone;
+    
+    return filtered_servo_pwm_cone; 
 }
 
 // 功能: 寻找车库阶段的巡线PD控制器（参数更平缓以适应低帧率）
 float servo_pd_parking_cruise(int target) { 
     if (mid.size() < 26) {
+        filtered_servo_pwm_parking_cruise = servo_pwm_mid; // 重置滤波状态
         return servo_pwm_mid;
     }
     int pidx = int((mid[23].x + mid[25].x) / 2);
@@ -1147,12 +1181,17 @@ float servo_pd_parking_cruise(int target) {
 
     if (servo_pwm > 1000) servo_pwm = 1000;
     else if (servo_pwm < 580) servo_pwm = 580;
-    return servo_pwm;
+    
+    // 应用一阶低通滤波，使控制更平滑
+    filtered_servo_pwm_parking_cruise = FILTER_ALPHA * servo_pwm + (1.0f - FILTER_ALPHA) * filtered_servo_pwm_parking_cruise;
+    
+    return filtered_servo_pwm_parking_cruise;
 }
 
 // 功能: 锥桶引导阶段的后备巡线PD控制器（参数更平缓以适应低帧率）
 float servo_pd_cone_cruise(int target) { 
     if (mid.size() < 26) {
+        filtered_servo_pwm_cone_cruise = servo_pwm_mid; // 重置滤波状态
         return servo_pwm_mid;
     }
     int pidx = int((mid[23].x + mid[25].x) / 2);
@@ -1167,7 +1206,11 @@ float servo_pd_cone_cruise(int target) {
 
     if (servo_pwm > 1000) servo_pwm = 1000;
     else if (servo_pwm < 580) servo_pwm = 580;
-    return servo_pwm;
+    
+    // 应用一阶低通滤波，使控制更平滑
+    filtered_servo_pwm_cone_cruise = FILTER_ALPHA * servo_pwm + (1.0f - FILTER_ALPHA) * filtered_servo_pwm_cone_cruise;
+    
+    return filtered_servo_pwm_cone_cruise;
 }
 
 
