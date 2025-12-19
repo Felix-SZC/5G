@@ -75,6 +75,8 @@ CarState current_state = CarState::Idle;
 
 //---------------舵机和电机相关（提前声明，供setCarState使用）---------------------------------------------
 int last_error = 0; // 存储上一次误差（初始化为0）
+int last_error_cone = 0; // 存储锥桶引导上一次误差
+int last_error_parking = 0; // 存储车库引导上一次误差
 
 
 // 功能: 将CarState枚举转换为可读字符串
@@ -112,6 +114,8 @@ void setCarState(CarState newState) {
             newState == CarState::ParkingSearch ||
             newState == CarState::PreParking) {
             last_error = 0; // 重置误差历史，避免状态切换时的突变
+            last_error_cone = 0;
+            last_error_parking = 0;
             std::cout << "[控制] 已重置PD控制误差历史" << std::endl;
         }
         
@@ -1128,9 +1132,9 @@ float servo_pd_parking(int ab_center_x) { // 跟随AB目标控制，ab_center_x�
 
     error_first = target - pidx; // 计算误差：目标位置(160) - AB位置(pidx)
 
-    servo_pwm_diff = kp * error_first + kd * (error_first - last_error); // 计算舵机PWM差值
+    servo_pwm_diff = kp * error_first + kd * (error_first - last_error_parking); 
 
-    last_error = error_first; // 更新上一次误差
+    last_error_parking = error_first; // 更新上一次误差
 
     servo_pwm = servo_pwm_mid + servo_pwm_diff; // 计算舵机PWM值
 
@@ -1153,9 +1157,9 @@ float servo_pd_cone(int target_x) {
 
     error_first = target - pidx; 
 
-    servo_pwm_diff = kp * error_first + kd * (error_first - last_error); 
+    servo_pwm_diff = kp * error_first + kd * (error_first - last_error_cone); 
 
-    last_error = error_first; 
+    last_error_cone = error_first; 
 
     servo_pwm = servo_pwm_mid + servo_pwm_diff; 
 
