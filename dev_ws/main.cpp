@@ -11,6 +11,7 @@
 #include <pigpio.h> // GPIO控制库
 #include <thread> // 线程库
 #include <vector> // 向量容器库
+#include <algorithm> // 算法库（用于排序）
 #include <chrono> // 时间库
 #include <iomanip> // 格式化输出
 #include <ctime> // 时间格式化
@@ -240,7 +241,7 @@ int turn_signal_label = -1;                                        // 转向标�
 
 // ----------------锥桶引导相关---------------------------------------------------
 int cone_outer_color = 1; // 0=蓝色为外侧边界, 1=黄色为外侧边界
-const int CONE_LANE_OFFSET = 30; // 锥桶单侧补全偏移量（像素）
+const int CONE_LANE_OFFSET = 90; // 锥桶单侧补全偏移量（像素）
 const int CONE_ENTER_THRESHOLD = 10; // 确认锥桶出现的帧数阈值
 const int CONE_BOTTOM_Y_THRESHOLD = 120; // 进入锥桶引导的底部高度阈值
 const int CONE_EXIT_THRESHOLD = 5; // 确认锥桶消失的帧数阈值
@@ -724,36 +725,70 @@ bool Contour_Area(const vector<Point>& contour1, const vector<Point>& contour2)
 //      last_turn_signal - 之前的转向动作（0=左转/左道，1=右转/右道）
 // 返回: 是否成功计算出目标点
 bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target_x, int cone_outer_color, int last_turn_signal) {
-    int sum_blue_x = 0;
-    int count_blue = 0;
-    int sum_yellow_x = 0;
-    int count_yellow = 0;
+    // 分别收集blue和yellow锥桶
+    std::vector<DetectObject> blue_cones;
+    std::vector<DetectObject> yellow_cones;
 
     for (const auto& obj : objects) {
         // 过滤置信度较低的目标（虽然fastestdet内部有阈值，这里可额外加）
         // if (obj.prob < 0.5f) continue;
 
-        float cx = obj.rect.x + obj.rect.width / 2.0f;
-        
         if (obj.label == 0) { // Blue
-            sum_blue_x += static_cast<int>(cx);
-            count_blue++;
+            blue_cones.push_back(obj);
         } else if (obj.label == 1) { // Yellow
-            sum_yellow_x += static_cast<int>(cx);
-            count_yellow++;
+            yellow_cones.push_back(obj);
         }
+    }
+
+    // 辅助函数：按y2（底部y坐标）降序排序的比较函数
+    auto compare_by_y2 = [](const DetectObject& a, const DetectObject& b) {
+        float y2_a = a.rect.y + a.rect.height;
+        float y2_b = b.rect.y + b.rect.height;
+        return y2_a > y2_b; // 降序：y2大的在前（更近的在前）
+    };
+
+    // 计算blue锥桶的平均x坐标（使用最近的1-2个）
+    float avg_blue = 0.0f;
+    int count_blue = 0;
+    if (!blue_cones.empty()) {
+        // 按y2降序排序
+        std::sort(blue_cones.begin(), blue_cones.end(), compare_by_y2);
+        
+        // 取最近的1-2个（最多2个）
+        int take_count = (blue_cones.size() >= 2) ? 2 : 1;
+        float sum_blue_x = 0.0f;
+        for (int i = 0; i < take_count; i++) {
+            float cx = blue_cones[i].rect.x + blue_cones[i].rect.width / 2.0f;
+            sum_blue_x += cx;
+        }
+        avg_blue = sum_blue_x / take_count;
+        count_blue = take_count;
+    }
+
+    // 计算yellow锥桶的平均x坐标（使用最近的1-2个）
+    float avg_yellow = 0.0f;
+    int count_yellow = 0;
+    if (!yellow_cones.empty()) {
+        // 按y2降序排序
+        std::sort(yellow_cones.begin(), yellow_cones.end(), compare_by_y2);
+        
+        // 取最近的1-2个（最多2个）
+        int take_count = (yellow_cones.size() >= 2) ? 2 : 1;
+        float sum_yellow_x = 0.0f;
+        for (int i = 0; i < take_count; i++) {
+            float cx = yellow_cones[i].rect.x + yellow_cones[i].rect.width / 2.0f;
+            sum_yellow_x += cx;
+        }
+        avg_yellow = sum_yellow_x / take_count;
+        count_yellow = take_count;
     }
 
     if (count_blue > 0 && count_yellow > 0) {
         // 双边检测：同时检测到蓝色和黄色锥桶
         // 目标点取两者中心位置的平均值，作为车道中心
-        float avg_blue = static_cast<float>(sum_blue_x) / count_blue;
-        float avg_yellow = static_cast<float>(sum_yellow_x) / count_yellow;
         target_x = static_cast<int>((avg_blue + avg_yellow) / 2.0f);
         return true;
     } else if (count_blue > 0) {
-        float avg_blue = static_cast<float>(sum_blue_x) / count_blue;
-
         // 判断蓝色锥桶是否在左侧（相对于车道中心）
         // 逻辑说明：
         // - 如果 cone_outer_color == 0（蓝色为外侧边界）且 last_turn_signal == 0（左转/左道），则蓝色在左侧
@@ -775,8 +810,6 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
         if (target_x < 0) target_x = 0;
         return true;
     } else if (count_yellow > 0) {
-        float avg_yellow = static_cast<float>(sum_yellow_x) / count_yellow;
-
         // 判断黄色锥桶是否在左侧（相对于车道中心）
         // 逻辑说明：
         // - 如果 cone_outer_color == 1（黄色为外侧边界）且 last_turn_signal == 0（左转/左道），则黄色在左侧
