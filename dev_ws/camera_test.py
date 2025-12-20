@@ -12,8 +12,8 @@ import time
 
 
 # 配置参数
-TARGET_WIDTH = 1280
-TARGET_HEIGHT = 720
+TARGET_WIDTH = 320
+TARGET_HEIGHT = 240
 TARGET_FPS = 10  # 目标帧率
 
 

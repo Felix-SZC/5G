@@ -1,6 +1,6 @@
 #include <iostream> // 标准输入输出流库
 #include <cstdlib> // 标准库
-#include <unistd.h> // Unix标准库
+
 
 #include <opencv2/opencv.hpp> // OpenCV主头文件
 #include <opencv2/core/core.hpp> // OpenCV核心功能
@@ -234,6 +234,18 @@ int cones_lost_count = 0; // 锥桶连续丢失计数
 int cone_target_x = -1; // 锥桶引导目标点X坐标（-1表示未检测到）
 
 //---------------入库相关------------------------------------------
+bool brief_stop_for_ab_detection = false; // 标志位：是否是为了激活A/B识别而执行的短暂停车
+
+// 新增：入库前蓝点引导相关
+const int PARKING_APPROACH_ROI_X = 10;
+const int PARKING_APPROACH_ROI_Y = 80;
+const int PARKING_APPROACH_ROI_WIDTH = 300;
+const int PARKING_APPROACH_ROI_HEIGHT = 100;
+const double PARKING_APPROACH_BLUE_AREA_MIN = 50.0; // 判定为接近车库需要的最小蓝色面积
+const int PARKING_APPROACH_CONFIRM_THRESHOLD = 3; // 连续检测到N帧才确认
+int parking_approach_detect_count = 0; // 蓝点接近区域连续检测计数
+bool parking_ab_detection_active = false; // 是否已激活A/B标识别
+
 int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
 int park_A_count = 0; // A车库累计识别次数
 int park_B_count = 0; // B车库累计识别次数
@@ -1043,6 +1055,52 @@ int banma_get(cv::Mat &frame) {
 }
 
 
+// 功能: 检测入库前引导区域（通过最大蓝色面积）
+bool detect_parking_approach_points(cv::Mat &frame) {
+    // 1. 裁剪ROI
+    int roiWidth = std::min(PARKING_APPROACH_ROI_WIDTH, frame.cols - PARKING_APPROACH_ROI_X);
+    int roiHeight = std::min(PARKING_APPROACH_ROI_HEIGHT, frame.rows - PARKING_APPROACH_ROI_Y);
+    if (roiWidth <= 0 || roiHeight <= 0) {
+        return false; // ROI无效
+    }
+    cv::Rect roiRect(PARKING_APPROACH_ROI_X, PARKING_APPROACH_ROI_Y, roiWidth, roiHeight);
+    cv::Mat roiFrame = frame(roiRect);
+
+    // 2. 转换到HSV并进行阈值分割
+    cv::Mat hsvRoi;
+    cv::cvtColor(roiFrame, hsvRoi, cv::COLOR_BGR2HSV);
+    
+    cv::Mat mask;
+    Scalar scalarl = Scalar(BLUE_H_MIN, BLUE_S_MIN, BLUE_V_MIN);
+    Scalar scalarH = Scalar(BLUE_H_MAX, BLUE_S_MAX, BLUE_V_MAX);
+    inRange(hsvRoi, scalarl, scalarH, mask);
+
+    // 3. 形态学开运算去噪
+    cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, openKernel);
+    
+    // 4. 查找轮廓并找出最大面积
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+    if (contours.empty()) {
+        return false;
+    }
+
+    // 按面积排序并获取最大面积
+    sort(contours.begin(), contours.end(), Contour_Area);
+    double max_area = contourArea(contours[0]);
+
+    // 5. 最终判定
+    if (max_area >= PARKING_APPROACH_BLUE_AREA_MIN) {
+        cout << "检测到入库引导区域 (最大蓝色面积: " << (int)max_area << ")" << endl;
+        return true;
+    }
+    
+    return false;
+}
+
+
 
 // 功能: 常规巡线PD控制器，基于中线偏差计算舵机PWM
 float servo_pd(int target) { // 赛道巡线控制
@@ -1248,7 +1306,7 @@ void banma_stop(){
     gpioPWM(servo_pin, servo_pwm_mid);
     gpioPWM(servo_pin, servo_pwm_mid);
     gpioPWM(servo_pin, servo_pwm_mid);
-    usleep(static_cast<useconds_t>(BANMA_STOP_SLEEP_SECONDS * 1000000)); // 转换为微秒
+    std::this_thread::sleep_for(std::chrono::microseconds(static_cast<long long>(BANMA_STOP_SLEEP_SECONDS * 1000000))); // 转换为微秒
     cout << "[流程] 检测到斑马线，车辆停车" << static_cast<int>(ZEBRA_STOP_DURATION_SECONDS) << "秒等待指令" << endl;
 }
 
@@ -1373,12 +1431,18 @@ void motor_servo_contral()
 
         case CarState::ParkingSearch:
             // 状态：寻找并进入车库
-            if (latest_park_id != 0) {
-                // 已识别到车库，跟随最近的A或B标识
-                servo_pwm_now = servo_pd_parking(parking_follow_x); 
+            if (parking_ab_detection_active) {
+                // 已激活A/B识别，使用慢速前进
+                if (latest_park_id != 0) {
+                    // 已识别到车库，跟随最近的A或B标识
+                    servo_pwm_now = servo_pd_parking(parking_follow_x); 
+                } else {
+                    // 未识别到车库，平缓巡线
+                    servo_pwm_now = servo_pd_parking_cruise(160);
+                }
                 gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
             } else {
-                // 未识别到车库，使用为ParkingSearch优化的平缓巡线参数
+                // 未激活A/B识别（正在寻找蓝色引导区），使用常规巡航速度
                 servo_pwm_now = servo_pd_parking_cruise(160);
                 gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE);
             }
@@ -1817,6 +1881,8 @@ int main(int argc, char* argv[])
                              setCarState(CarState::LaneChange);
                         } else {
                              cout << "[流程] " << static_cast<int>(POST_ZEBRA_DELAY_SECONDS) << "秒巡线结束，未检测到转向标志，直接开始寻找并识别A/B车库" << endl;
+                             parking_ab_detection_active = false;
+                             parking_approach_detect_count = 0;
                              setCarState(CarState::ParkingSearch);
                         }
                     }
@@ -1899,54 +1965,81 @@ int main(int argc, char* argv[])
                 
                 if (has_seen_cones && cones_lost_count >= CONE_EXIT_THRESHOLD) {
                     cout << "[流程] 通过锥桶区域，开始寻找A/B车库" << endl;
+                    parking_ab_detection_active = false;
+                    parking_approach_detect_count = 0;
                     setCarState(CarState::ParkingSearch);
                 }
                 break;
 
             case CarState::ParkingSearch:
                 Tracking(bin_image);
-                result_ab.clear();
-                result_ab = fastestdet_ab->detect(frame);
+
+                if (!parking_ab_detection_active)
                 {
-                    // 初始化最近检测框（用于查找最近的A/B标识）
-                    DetectObject closest_box = {cv::Rect_<float>(0, 0, 0, 0), -1, 0.0f};
-                    if (!result_ab.empty()) {
-                        // 查找最近的A/B标识（y2最大，且满足阈值要求）
-                        for(const auto& box : result_ab) {
-                            float box_y2 = box.rect.y + box.rect.height;
-                            if (box_y2 > BZ_Y_LOWER_THRESHOLD) {
-                                float closest_y2 = closest_box.rect.y + closest_box.rect.height;
-                                if (box_y2 > closest_y2) closest_box = box;
-                            }
+                    // 阶段一：检测蓝点
+                    if (detect_parking_approach_points(frame)) {
+                        parking_approach_detect_count++;
+                        cout << "[入库搜索] 检测到引导蓝点, 计数: " << parking_approach_detect_count << "/" << PARKING_APPROACH_CONFIRM_THRESHOLD << endl;
+                    } else {
+                        if (parking_approach_detect_count > 0) {
+                           cout << "[入库搜索] 引导蓝点丢失, 重置计数" << endl;
                         }
+                        parking_approach_detect_count = 0;
                     }
 
-                    if (closest_box.label != -1) {
-                        // 累加A/B车库识别计数
-                        if (closest_box.label == 0) park_A_count++;
-                        else if (closest_box.label == 1) park_B_count++;
-
-                        // 更新最近检测到的车库信息和跟随坐标
-                        float closest_y2 = closest_box.rect.y + closest_box.rect.height;
-                        latest_park_id = closest_box.label + 1;
-                        float target_x = closest_box.rect.x + closest_box.rect.width / 2.0f;
-                        parking_follow_x = static_cast<int>(target_x);
-
-                        cout << "[停车] 最近: " << (latest_park_id == 1 ? "A" : "B") 
-                             << " | 计数 A:" << park_A_count << ", B:" << park_B_count
-                             << " | Y:" << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD
-                             << " | 跟随x:" << parking_follow_x << endl;
-
-                        // 检查是否达到入库阈值
-                        if (closest_y2 >= PARKING_Y_THRESHOLD) {
-                            cout << "[流程] 达到入库阈值，触发短暂停车，位置 x=" << parking_follow_x << endl;
-                            pending_pre_parking_label = -1;
-                            brief_stop_start_time = std::chrono::steady_clock::now();
-                            setCarState(CarState::BriefStop);
+                    if (parking_approach_detect_count >= PARKING_APPROACH_CONFIRM_THRESHOLD) {
+                        cout << "[流程] 确认接近停车场, 准备执行短暂停车以稳定车辆" << endl;
+                        brief_stop_for_ab_detection = true; // 设置标志位
+                        brief_stop_start_time = std::chrono::steady_clock::now();
+                        setCarState(CarState::BriefStop);
+                    }
+                }
+                else
+                {
+                    // 阶段二：执行原有的A/B识别逻辑
+                    result_ab.clear();
+                    result_ab = fastestdet_ab->detect(frame);
+                    {
+                        // 初始化最近检测框（用于查找最近的A/B标识）
+                        DetectObject closest_box = {cv::Rect_<float>(0, 0, 0, 0), -1, 0.0f};
+                        if (!result_ab.empty()) {
+                            // 查找最近的A/B标识（y2最大，且满足阈值要求）
+                            for(const auto& box : result_ab) {
+                                float box_y2 = box.rect.y + box.rect.height;
+                                if (box_y2 > BZ_Y_LOWER_THRESHOLD) {
+                                    float closest_y2 = closest_box.rect.y + closest_box.rect.height;
+                                    if (box_y2 > closest_y2) closest_box = box;
+                                }
+                            }
                         }
-                    } else {
-                        // 未检测到有效目标，重置车库ID
-                        latest_park_id = 0;
+
+                        if (closest_box.label != -1) {
+                            // 累加A/B车库识别计数
+                            if (closest_box.label == 0) park_A_count++;
+                            else if (closest_box.label == 1) park_B_count++;
+
+                            // 更新最近检测到的车库信息和跟随坐标
+                            float closest_y2 = closest_box.rect.y + closest_box.rect.height;
+                            latest_park_id = closest_box.label + 1;
+                            float target_x = closest_box.rect.x + closest_box.rect.width / 2.0f;
+                            parking_follow_x = static_cast<int>(target_x);
+
+                            cout << "[停车] 最近: " << (latest_park_id == 1 ? "A" : "B") 
+                                 << " | 计数 A:" << park_A_count << ", B:" << park_B_count
+                                 << " | Y:" << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD
+                                 << " | 跟随x:" << parking_follow_x << endl;
+
+                            // 检查是否达到入库阈值
+                            if (closest_y2 >= PARKING_Y_THRESHOLD) {
+                                cout << "[流程] 达到入库阈值，触发短暂停车，位置 x=" << parking_follow_x << endl;
+                                pending_pre_parking_label = -1;
+                                brief_stop_start_time = std::chrono::steady_clock::now();
+                                setCarState(CarState::BriefStop);
+                            }
+                        } else {
+                            // 未检测到有效目标，重置车库ID
+                            latest_park_id = 0;
+                        }
                     }
                 }
                 break;
@@ -1959,23 +2052,33 @@ int main(int argc, char* argv[])
                         std::chrono::steady_clock::now() - brief_stop_start_time).count() / 1000.0f;
                     
                     if (elapsed >= (BRIEF_STOP_REVERSE_DURATION + BRIEF_STOP_HOLD_DURATION)) {
-                        // 短暂停车结束，决定下一步动作
-                        int decided_label = pending_pre_parking_label;
-                        if (decided_label == -1) decided_label = decide_parking_label_from_counts();
-
-                        if (decided_label != -1) {
-                            // 成功确定目标车库，进入预入库阶段
-                            final_target_label = decided_label;
-                            parking_target_not_detected_count = 0;
-                            parking_target_detected_this_frame = false;
-                            
-                            cout << "[流程] 短暂停车结束，开始预入库 -> "
-                                 << (final_target_label == 0 ? "A(左)" : "B(右)") << endl;
-                            setCarState(CarState::PreParking);
-                        } else {
-                            // 无法确认目标，继续寻找
-                            cout << "[警告] 无法确认A/B，继续寻找" << endl;
+                        if (brief_stop_for_ab_detection) {
+                            // 情况一：为了开始A/B识别而停车
+                            cout << "[流程] 短暂停车结束，减速并激活A/B识别" << endl;
+                            parking_ab_detection_active = true;
+                            brief_stop_for_ab_detection = false; // 重置标志位
                             setCarState(CarState::ParkingSearch);
+                        } else {
+                            // 情况二：常规的入库前停车
+                            int decided_label = pending_pre_parking_label;
+                            if (decided_label == -1) decided_label = decide_parking_label_from_counts();
+
+                            if (decided_label != -1) {
+                                // 成功确定目标车库，进入预入库阶段
+                                final_target_label = decided_label;
+                                parking_target_not_detected_count = 0;
+                                parking_target_detected_this_frame = false;
+                                
+                                cout << "[流程] 短暂停车结束，开始预入库 -> "
+                                     << (final_target_label == 0 ? "A(左)" : "B(右)") << endl;
+                                setCarState(CarState::PreParking);
+                            } else {
+                                // 无法确认目标，继续寻找
+                                cout << "[警告] 无法确认A/B，继续寻找" << endl;
+                                parking_ab_detection_active = true; // 直接重新尝试A/B识别
+                                parking_approach_detect_count = 0;
+                                setCarState(CarState::ParkingSearch);
+                            }
                         }
                     }
                 }
@@ -2082,7 +2185,7 @@ int main(int argc, char* argv[])
     cout << "\n[清理] 释放模型资源..." << endl;
     gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock); // 确保电机停止
     gpioPWM(servo_pin, servo_pwm_mid);               // 舵机回中
-    usleep(100000);                                  // 短暂延时
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));                                  // 短暂延时
 
     if (fastestdet_obs) {
         delete fastestdet_obs;
