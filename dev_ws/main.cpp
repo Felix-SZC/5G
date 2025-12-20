@@ -134,7 +134,7 @@ Mat bin_image; // 存储二值化图像--Sobel检测后图像
 std::chrono::steady_clock::time_point last_save_time; // 上次保存图像的时间
 const int SAVE_INTERVAL_SECONDS = 30; // 保存间隔（秒）
 const std::string SAVE_DIR = "captured_images"; // 保存目录
-const int MIN_COMPONENT_AREA = 200; // 连通区域最小面积阈值（用于过滤噪声）
+const int MIN_COMPONENT_AREA = 400; // 连通区域最小面积阈值（用于过滤噪声）
 
 //---------------蓝色挡板发车相关----------------------------------------------
 int find_first = 0; // 标记是否第一次找到蓝色挡板
@@ -1456,7 +1456,7 @@ int main(int argc, char* argv[])
     // 初始化检测模型
     cout << "[初始化] 加载障碍物检测模型..." << endl;
     try {
-        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.4f, 0.4f, 4, false);
+        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.5f, 0.5f, 4, false);
         cout << "[初始化] 障碍物检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 障碍物检测模型加载失败: " << e.what() << endl;
