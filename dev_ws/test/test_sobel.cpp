@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
 
     // 组合梯度，权重偏向Y方向
     Mat gradientMagnitude8u;
-    addWeighted(absSobelY, 1.0, absSobelX, 0.5, 0, gradientMagnitude8u);
+    addWeighted(absSobelY, 1.0, absSobelX, 1.0, 0, gradientMagnitude8u);
 
     imshow("5. Sobel Gradient ROI", gradientMagnitude8u);
     cout << "按任意键继续..." << endl;
@@ -90,13 +90,13 @@ int main(int argc, char** argv) {
     waitKey(0);
 
     Mat adaptiveMask;
-    threshold(topHat, adaptiveMask, 10, 255, THRESH_BINARY);
+    threshold(topHat, adaptiveMask, 5, 255, THRESH_BINARY);
     imshow("7. Top-hat Threshold", adaptiveMask);
     cout << "按任意键继续..." << endl;
     waitKey(0);
 
     Mat gradientMask;
-    threshold(gradientMagnitude8u, gradientMask, 50, 255, THRESH_BINARY);
+    threshold(gradientMagnitude8u, gradientMask, 30, 255, THRESH_BINARY);
     Mat gradientKernel = getStructuringElement(MORPH_RECT, Size(3, 3));
     dilate(gradientMask, gradientMask, gradientKernel);
     imshow("8. Gradient Mask ROI", gradientMask);
@@ -114,28 +114,35 @@ int main(int argc, char** argv) {
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
-    // 形态学操作 (原地，无克隆)
-    static cv::Mat kernel_close = getStructuringElement(MORPH_RECT, Size(9, 5));
-    morphologyEx(binaryMask, binaryMask, MORPH_CLOSE, kernel_close);
-    static cv::Mat kernel_dilate = getStructuringElement(MORPH_RECT, Size(5, 5));
-    dilate(binaryMask, binaryMask, kernel_dilate, Point(-1, -1), 1);
-
+    // 先进行连通域分析，过滤掉不符合面积要求的连通域
     Mat labels, stats, centroids;
     int numLabels = connectedComponentsWithStats(binaryMask, labels, stats, centroids, 8, CV_32S);
-    Mat filteredMorph = Mat::zeros(binaryMask.size(), CV_8U);
+    Mat filteredByArea = Mat::zeros(binaryMask.size(), CV_8U);
     for (int i = 1; i < numLabels; ++i) {
         if (stats.at<int>(i, CC_STAT_AREA) >= MIN_COMPONENT_AREA) {
-            filteredMorph.setTo(255, labels == i);
+            filteredByArea.setTo(255, labels == i);
         }
     }
+    
+    imshow("10. Area Filtered ROI", filteredByArea);
+    cout << "按任意键继续..." << endl;
+    waitKey(0);
+    
+    // 形态学操作 (在面积过滤后的结果上进行)
+    static cv::Mat kernel_close = getStructuringElement(MORPH_RECT, Size(13, 9));
+    morphologyEx(filteredByArea, filteredByArea, MORPH_CLOSE, kernel_close);
+    static cv::Mat kernel_dilate = getStructuringElement(MORPH_RECT, Size(7, 7));
+    dilate(filteredByArea, filteredByArea, kernel_dilate, Point(-1, -1), 1);
 
-    imshow("10. Morphed ROI", filteredMorph);
+    Mat filteredMorph = filteredByArea;
+
+    imshow("11. Morphed ROI", filteredMorph);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
     // Hough直线检测
     vector<Vec4i> lines;
-    HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 10, 15, 8);
+    HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 8, 10, 12);
     cout << "检测到 " << lines.size() << " 条直线" << endl;
 
     // 在原图上绘制结果
@@ -148,7 +155,7 @@ int main(int argc, char** argv) {
         double angle = atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
         double length = hypot(l[3] - l[1], l[2] - l[0]);
 
-        if (abs(angle) > 15 && length > 8) {
+        if (abs(angle) > 5 && length > 8) {
             Vec4i adjustedLine = l;
             adjustedLine[0] += roiRect.x; adjustedLine[1] += roiRect.y;
             adjustedLine[2] += roiRect.x; adjustedLine[3] += roiRect.y;
@@ -161,11 +168,11 @@ int main(int argc, char** argv) {
         }
     }
 
-    imshow("11. Hough Lines", houghResult);
+    imshow("12. Hough Lines", houghResult);
     cout << "按任意键继续..." << endl;
     waitKey(0);
 
-    imshow("12. Final Result", finalImage);
+    imshow("13. Final Result", finalImage);
     cout << "按ESC退出" << endl;
     waitKey(0);
     

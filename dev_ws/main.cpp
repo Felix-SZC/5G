@@ -46,7 +46,7 @@ const float START_DELAY_SECONDS = 2.0f;              // 发车延时时间（秒
 const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时间（秒）
 const float POST_ZEBRA_DELAY_SECONDS = 1.0f;        // 斑马线后巡线延迟时间（秒）
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
-const float LANE_CHANGE_DURATION_SECONDS = 1.8f;    // 变道持续时间（秒）
+const float LANE_CHANGE_DURATION_SECONDS = 1.5f;    // 变道持续时间（秒）
 const int SERVO_PWM_LEFT_TURN = 760;                // 左转PWM值
 const int SERVO_PWM_RIGHT_TURN = 690;               // 右转PWM值
 const int MOTOR_SPEED_DELTA_LANE_CHANGE = 1300;     // 变道速度增量
@@ -73,12 +73,6 @@ enum class CarState {
 
 CarState current_state = CarState::Idle;
 
-//---------------舵机和电机相关（提前声明，供setCarState使用）---------------------------------------------
-int last_error = 0; // 存储上一次误差（初始化为0）
-int last_error_cone = 0; // 存储锥桶引导上一次误差
-int last_error_parking = 0; // 存储车库引导上一次误差
-
-
 // 功能: 将CarState枚举转换为可读字符串
 std::string carStateToString(CarState state) {
     switch (state) {
@@ -103,22 +97,7 @@ void setCarState(CarState newState) {
     if (current_state != newState) {
         std::cout << "[状态变更] " << carStateToString(current_state) 
                   << " -> " << carStateToString(newState) << std::endl;
-        
-        // 状态切换时重置PD控制的last_error，避免误差突变导致车辆摇晃
-        // 只有在切换到需要PD控制的状态时才重置（排除Idle、StartDelay、ZebraStop、BriefStop、ParkingComplete）
-        if (newState == CarState::Cruise || 
-            newState == CarState::Avoidance || 
-            newState == CarState::PostZebra ||
-            newState == CarState::LaneChange ||
-            newState == CarState::ConeGuidance ||
-            newState == CarState::ParkingSearch ||
-            newState == CarState::PreParking) {
-            last_error = 0; // 重置误差历史，避免状态切换时的突变
-            last_error_cone = 0;
-            last_error_parking = 0;
-            std::cout << "[控制] 已重置PD控制误差历史" << std::endl;
-        }
-        
+
         current_state = newState;
     }
 }
@@ -187,7 +166,7 @@ std::vector<cv::Point> right_line; // 存储右线条
 std::vector<cv::Point> last_mid; // 存储上一次的中线，用于平滑滤波
 
 int error_first; // 存储第一次误差
-// last_error 已在前面声明
+int last_error;
 float servo_pwm_diff; // 存储舵机PWM差值
 float servo_pwm; // 存储舵机PWM值
 
@@ -246,9 +225,9 @@ int turn_signal_label = -1;                                        // 转向标�
 // ----------------锥桶引导相关---------------------------------------------------
 int cone_outer_color = 1; // 0=蓝色为外侧边界, 1=黄色为外侧边界
 const int CONE_LANE_OFFSET = 90; // 锥桶单侧补全偏移量（像素）
-const int CONE_ENTER_THRESHOLD = 10; // 确认锥桶出现的帧数阈值
+const int CONE_ENTER_THRESHOLD = 5; // 确认锥桶出现的帧数阈值
 const int CONE_BOTTOM_Y_THRESHOLD = 120; // 进入锥桶引导的底部高度阈值
-const int CONE_EXIT_THRESHOLD = 5; // 确认锥桶消失的帧数阈值
+const int CONE_EXIT_THRESHOLD = 3; // 确认锥桶消失的帧数阈值
 bool has_seen_cones = false; // 是否已确认进入锥桶引导模式
 int cones_detect_count = 0; // 锥桶连续检测计数
 int cones_lost_count = 0; // 锥桶连续丢失计数
@@ -461,22 +440,25 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
     cv::medianBlur(binaryMask, binaryMask, 3); // 中值去椒盐噪声
     // cv::morphologyEx(binaryMask, binaryMask, cv::MORPH_OPEN, noiseKernel); // 小结构开运算 - 1x1内核无效，已移除
 
-    // 原地执行形态学操作，避免binaryMask.clone()的开销
-    static cv::Mat kernel_close = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(13, 9)); // 闭运算连接断裂
-    cv::morphologyEx(binaryMask, binaryMask, cv::MORPH_CLOSE, kernel_close);
-    static cv::Mat kernel_dilate = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7)); // 膨胀加粗车道线
-    cv::dilate(binaryMask, binaryMask, kernel_dilate, cv::Point(-1, -1), 1);
-
+    // 先进行连通域分析，过滤掉不符合面积要求的连通域
     cv::Mat labels, stats, centroids;
     int numLabels = cv::connectedComponentsWithStats(binaryMask, labels, stats, centroids, 8, CV_32S); // 连通域分析
-    cv::Mat filteredMorph = cv::Mat::zeros(binaryMask.size(), CV_8U);
+    cv::Mat filteredByArea = cv::Mat::zeros(binaryMask.size(), CV_8U);
     for (int i = 1; i < numLabels; ++i)
     {
         if (stats.at<int>(i, cv::CC_STAT_AREA) >= MIN_COMPONENT_AREA)
         {
-            filteredMorph.setTo(255, labels == i);
+            filteredByArea.setTo(255, labels == i);
         }
     }
+
+    // 在面积过滤后的结果上执行形态学操作，避免binaryMask.clone()的开销
+    static cv::Mat kernel_close = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(13, 9)); // 闭运算连接断裂
+    cv::morphologyEx(filteredByArea, filteredByArea, cv::MORPH_CLOSE, kernel_close);
+    static cv::Mat kernel_dilate = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7)); // 膨胀加粗车道线
+    cv::dilate(filteredByArea, filteredByArea, kernel_dilate, cv::Point(-1, -1), 1);
+
+    cv::Mat filteredMorph = filteredByArea;
 
     std::vector<cv::Vec4i> lines;
     cv::HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 8, 10, 12);
@@ -498,6 +480,10 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
         if (state == CarState::Cruise || state == CarState::Avoidance)
         {
             angle_threshold = 15.0f;
+        }
+        else if (state == CarState::ConeGuidance && has_seen_cones)
+        {
+            angle_threshold = 35.0f;
         }
 
         if (std::abs(angle) > angle_threshold && length > 8)
@@ -723,20 +709,24 @@ bool Contour_Area(const vector<Point>& contour1, const vector<Point>& contour2)
 }
 
 // 功能: 计算锥桶引导目标点
+// 策略: 
+// 1. 如果蓝黄锥桶都被检测到，则分别取最近的1-2个计算中心，再取中心的中点作为目标。
+// 2. 如果只有单边（蓝或黄），则使用该侧所有锥桶的平均位置，再根据内外侧设置进行偏移，计算虚拟中点。
 // 参数: objects - 检测到的锥桶对象列表
 //      target_x - 输出的目标点X坐标
 //      cone_outer_color - 配置变量，指定外侧边界颜色（0=蓝色为外侧边界, 1=黄色为外侧边界）
 //      last_turn_signal - 之前的转向动作（0=左转/左道，1=右转/右道）
 // 返回: 是否成功计算出目标点
 bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target_x, int cone_outer_color, int last_turn_signal) {
+    // 如果锥桶数量小于等于2，视为无效检测
+    if (objects.size() <= 2) {
+        return false;
+    }
     // 分别收集blue和yellow锥桶
     std::vector<DetectObject> blue_cones;
     std::vector<DetectObject> yellow_cones;
 
     for (const auto& obj : objects) {
-        // 过滤置信度较低的目标（虽然fastestdet内部有阈值，这里可额外加）
-        // if (obj.prob < 0.5f) continue;
-
         if (obj.label == 0) { // Blue
             blue_cones.push_back(obj);
         } else if (obj.label == 1) { // Yellow
@@ -751,53 +741,51 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
         return y2_a > y2_b; // 降序：y2大的在前（更近的在前）
     };
 
-    // 计算blue锥桶的平均x坐标（使用最近的1-2个）
-    float avg_blue = 0.0f;
-    int count_blue = 0;
+    // 对锥桶列表进行排序
     if (!blue_cones.empty()) {
-        // 按y2降序排序
         std::sort(blue_cones.begin(), blue_cones.end(), compare_by_y2);
-        
-        // 取最近的1-2个（最多2个）
-        int take_count = (blue_cones.size() >= 2) ? 2 : 1;
-        float sum_blue_x = 0.0f;
-        for (int i = 0; i < take_count; i++) {
-            float cx = blue_cones[i].rect.x + blue_cones[i].rect.width / 2.0f;
-            sum_blue_x += cx;
-        }
-        avg_blue = sum_blue_x / take_count;
-        count_blue = take_count;
     }
-
-    // 计算yellow锥桶的平均x坐标（使用最近的1-2个）
-    float avg_yellow = 0.0f;
-    int count_yellow = 0;
     if (!yellow_cones.empty()) {
-        // 按y2降序排序
         std::sort(yellow_cones.begin(), yellow_cones.end(), compare_by_y2);
-        
-        // 取最近的1-2个（最多2个）
-        int take_count = (yellow_cones.size() >= 2) ? 2 : 1;
-        float sum_yellow_x = 0.0f;
-        for (int i = 0; i < take_count; i++) {
-            float cx = yellow_cones[i].rect.x + yellow_cones[i].rect.width / 2.0f;
-            sum_yellow_x += cx;
-        }
-        avg_yellow = sum_yellow_x / take_count;
-        count_yellow = take_count;
     }
 
-    if (count_blue > 0 && count_yellow > 0) {
-        // 双边检测：同时检测到蓝色和黄色锥桶
-        // 目标点取两者中心位置的平均值，作为车道中心
+    bool has_blue = !blue_cones.empty();
+    bool has_yellow = !yellow_cones.empty();
+
+    // 3. 根据锥桶分布情况计算目标点
+    if (has_blue && has_yellow) {
+        // --- 情况一: 双边都识别到 ---
+        // 策略: 只使用每侧最近的最多3个锥桶
+        float avg_blue = 0.0f;
+        int take_count_blue = std::min(3, (int)blue_cones.size());
+        float sum_blue_x = 0.0f;
+        for (int i = 0; i < take_count_blue; i++) {
+            sum_blue_x += blue_cones[i].rect.x + blue_cones[i].rect.width / 2.0f;
+        }
+        avg_blue = sum_blue_x / take_count_blue;
+
+        float avg_yellow = 0.0f;
+        int take_count_yellow = std::min(3, (int)yellow_cones.size());
+        float sum_yellow_x = 0.0f;
+        for (int i = 0; i < take_count_yellow; i++) {
+            sum_yellow_x += yellow_cones[i].rect.x + yellow_cones[i].rect.width / 2.0f;
+        }
+        avg_yellow = sum_yellow_x / take_count_yellow;
+        
+        // 目标点取两侧中心位置的平均值，作为车道中心
         target_x = static_cast<int>((avg_blue + avg_yellow) / 2.0f);
         return true;
-    } else if (count_blue > 0) {
-        // 判断蓝色锥桶是否在左侧（相对于车道中心）
-        // 逻辑说明：
-        // - 如果 cone_outer_color == 0（蓝色为外侧边界）且 last_turn_signal == 0（左转/左道），则蓝色在左侧
-        // - 如果 cone_outer_color == 1（黄色为外侧边界）且 last_turn_signal == 1（右转/右道），则蓝色在左侧
-        // 其他情况：蓝色在右侧
+
+    } else if (has_blue) {
+        // --- 情况二: 只有蓝色锥桶 ---
+        // 策略: 使用所有检测到的蓝色锥桶计算平均位置
+        float sum_blue_x = 0.0f;
+        for (const auto& cone : blue_cones) {
+            sum_blue_x += cone.rect.x + cone.rect.width / 2.0f;
+        }
+        float avg_blue = sum_blue_x / blue_cones.size();
+
+        // 判断蓝色锥桶在左侧还是右侧
         bool is_blue_left = (cone_outer_color == 0 && last_turn_signal == 0) || 
                             (cone_outer_color == 1 && last_turn_signal == 1);
 
@@ -809,16 +797,16 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
             target_x = static_cast<int>(avg_blue) - CONE_LANE_OFFSET;
         }
         
-        // 边界保护：确保目标点在图像范围内
-        if (target_x > 320) target_x = 320; 
-        if (target_x < 0) target_x = 0;
-        return true;
-    } else if (count_yellow > 0) {
-        // 判断黄色锥桶是否在左侧（相对于车道中心）
-        // 逻辑说明：
-        // - 如果 cone_outer_color == 1（黄色为外侧边界）且 last_turn_signal == 0（左转/左道），则黄色在左侧
-        // - 如果 cone_outer_color == 0（蓝色为外侧边界）且 last_turn_signal == 1（右转/右道），则黄色在左侧
-        // 其他情况：黄色在右侧
+    } else if (has_yellow) {
+        // --- 情况三: 只有黄色锥桶 ---
+        // 策略: 使用所有检测到的黄色锥桶计算平均位置
+        float sum_yellow_x = 0.0f;
+        for (const auto& cone : yellow_cones) {
+            sum_yellow_x += cone.rect.x + cone.rect.width / 2.0f;
+        }
+        float avg_yellow = sum_yellow_x / yellow_cones.size();
+
+        // 判断黄色锥桶在左侧还是右侧
         bool is_yellow_left = (cone_outer_color == 1 && last_turn_signal == 0) || 
                               (cone_outer_color == 0 && last_turn_signal == 1);
 
@@ -828,15 +816,18 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
         } else {
             // 黄色在右侧：车道中心在黄色左侧，目标点 = 黄色位置 - 偏移量
             target_x = static_cast<int>(avg_yellow) - CONE_LANE_OFFSET;
+
         }
 
-        // 边界保护：确保目标点在图像范围内
-        if (target_x > 320) target_x = 320; 
-        if (target_x < 0) target_x = 0;
-        return true;
+    } else {
+        // --- 情况四: 未检测到任何锥桶 ---
+        return false;
     }
 
-    return false;
+    // 对单边情况计算出的目标点进行边界保护
+    if (target_x > 320) target_x = 320; 
+    if (target_x < 0) target_x = 0;
+    return true;
 }
 
 // 定义蓝色挡板 寻找函数
@@ -1120,6 +1111,41 @@ float servo_pd_bz(int target) { // 避障巡线控制
     return servo_pwm; // 返回舵机PWM值
 }
 
+// 功能: 斑马线后巡线PD控制器，基于中线偏差计算舵机PWM
+float servo_pd_post_zebra(int target) { // 赛道巡线控制
+
+    // 安全检查：确保mid向量有足够的元素
+    if (mid.size() < 26) {
+        cerr << "[警告] servo_pd_post_zebra: mid向量元素不足 (" << mid.size() << " < 26)，返回中值" << endl;
+        return servo_pwm_mid;
+    }
+
+    int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
+
+    float kp = 1.5; // 比例系数
+    float kd = 4.0; // 微分系数
+
+    error_first = target - pidx; // 计算误差
+
+    servo_pwm_diff = kp * error_first + kd * (error_first - last_error); // 计算舵机PWM差值
+
+    last_error = error_first; // 更新上一次误差
+
+    servo_pwm = servo_pwm_mid + servo_pwm_diff; // 计算舵机PWM值
+
+    if (servo_pwm > 1000) // 如果PWM值大于900
+    {
+        servo_pwm = 1000; // 限制PWM值为900
+    }
+    else if (servo_pwm < 580) // 如果PWM值小于600
+    {
+        servo_pwm = 580; // 限制PWM值为600
+    }
+    
+    return servo_pwm; // 返回舵机PWM值
+}
+
+
 // 功能: 预入库阶段跟随AB目标的PD控制器，P和D参数较大，响应更灵敏
 float servo_pd_parking(int ab_center_x) { // 跟随AB目标控制，ab_center_x是AB中心点x坐标
 
@@ -1132,9 +1158,9 @@ float servo_pd_parking(int ab_center_x) { // 跟随AB目标控制，ab_center_x�
 
     error_first = target - pidx; // 计算误差：目标位置(160) - AB位置(pidx)
 
-    servo_pwm_diff = kp * error_first + kd * (error_first - last_error_parking); 
+    servo_pwm_diff = kp * error_first + kd * (error_first - last_error); 
 
-    last_error_parking = error_first; // 更新上一次误差
+    last_error = error_first; // 更新上一次误差
 
     servo_pwm = servo_pwm_mid + servo_pwm_diff; // 计算舵机PWM值
 
@@ -1157,9 +1183,9 @@ float servo_pd_cone(int target_x) {
 
     error_first = target - pidx; 
 
-    servo_pwm_diff = kp * error_first + kd * (error_first - last_error_cone); 
+    servo_pwm_diff = kp * error_first + kd * (error_first - last_error); 
 
-    last_error_cone = error_first; 
+    last_error = error_first; 
 
     servo_pwm = servo_pwm_mid + servo_pwm_diff; 
 
@@ -1177,7 +1203,7 @@ float servo_pd_parking_cruise(int target) {
     }
     int pidx = int((mid[23].x + mid[25].x) / 2);
 
-    float kp = 0.8; 
+    float kp = 0.6; 
     float kd = 3.5; 
 
     error_first = target - pidx;
@@ -1381,17 +1407,24 @@ void motor_servo_contral()
             if (cone_target_x != -1) {
                 // 如果计算出了锥桶目标，使用专门的锥桶PD控制
                 servo_pwm_now = servo_pd_cone(cone_target_x);
+                gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_AVOID);
             } else {
                 // 否则使用为锥桶引导优化的平缓巡线参数
                 servo_pwm_now = servo_pd_cone_cruise(160);
+                gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE);
+
             }
-            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE);
             break;
 
         case CarState::Cruise:
-        case CarState::PostZebra:
             // 状态：常规巡线（包括寻找斑马线或避障间隙）
             servo_pwm_now = servo_pd(160); // 使用常规PD控制
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE); // 使用常规速度
+            break;
+
+        case CarState::PostZebra:
+            // 状态：常规巡线（包括寻找斑马线或避障间隙）
+            servo_pwm_now = servo_pd_post_zebra(160); // 使用常规PD控制
             gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE); // 使用常规速度
             break;
             
@@ -1423,7 +1456,7 @@ int main(int argc, char* argv[])
     // 初始化检测模型
     cout << "[初始化] 加载障碍物检测模型..." << endl;
     try {
-        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.5f, 0.5f, 4, false);
+        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.4f, 0.4f, 4, false);
         cout << "[初始化] 障碍物检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 障碍物检测模型加载失败: " << e.what() << endl;
@@ -1432,7 +1465,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载转向标志检测模型..." << endl;
     try {
-        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.1f, 0.1f, 4, false);
+        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.4f, 0.4f, 4, false);
         cout << "[初始化] 转向标志检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 转向标志检测模型加载失败: " << e.what() << endl;
@@ -1591,7 +1624,7 @@ int main(int argc, char* argv[])
                         // 查找蓝色障碍物（label=0，且在有效高度范围内）
                         for (const auto& box : result) {
                             int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
-                            if (box.label == 0 &&
+                            if (box.label == 0 && box.prob > 0.6f &&
                                 box_y2 < BZ_Y_UPPER_THRESHOLD && box_y2 > BZ_Y_LOWER_THRESHOLD) {
                                 obstacle_found_this_frame = true;
                                 blue_box = box;
@@ -1669,7 +1702,7 @@ int main(int argc, char* argv[])
                     // 查找蓝色障碍物（label=0，且在有效高度范围内）
                     for (const auto& box : result) {
                         int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
-                        if (box.label == 0 && box_y2 < BZ_Y_UPPER_THRESHOLD && box_y2 > BZ_Y_LOWER_THRESHOLD) {
+                        if (box.label == 0 && box.prob > 0.6f && box_y2 < BZ_Y_UPPER_THRESHOLD && box_y2 > BZ_Y_LOWER_THRESHOLD) {
                             blue_box = box;
                             blue_obstacle_found = true;
                             break;
