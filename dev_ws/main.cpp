@@ -235,7 +235,6 @@ int turn_signal_label = -1;                                        // 转向标�
 
 // ----------------锥桶引导相关---------------------------------------------------
 int cone_outer_color = 1; // 0=蓝色为外侧边界, 1=黄色为外侧边界
-const int CONE_LANE_OFFSET = 90; // 锥桶单侧补全偏移量（像素）
 const int CONE_ENTER_THRESHOLD = 5; // 确认锥桶出现的帧数阈值
 const int CONE_BOTTOM_Y_THRESHOLD = 140; // 进入锥桶引导的底部高度阈值
 const int CONE_EXIT_THRESHOLD = 3; // 确认锥桶消失的帧数阈值
@@ -245,6 +244,7 @@ int cones_lost_count = 0; // 锥桶连续丢失计数
 int cone_target_x = -1; // 锥桶引导目标点X坐标（-1表示未检测到）
 bool need_post_cone_cruise_delay = false; // 是否需要锥桶引导后巡线延迟
 bool from_cone_guidance = false; // 是否从锥桶引导来的（用于区分处理逻辑）
+std::vector<int> lane_widths; // 存储不同高度对应的赛道宽度
 
 //---------------入库相关------------------------------------------
 
@@ -332,6 +332,29 @@ void servo_motor_pwmInit(void)
 }
 
 //------------------------------------------------------------------------------------------------------------
+
+// 功能: 初始化赛道宽度查找表
+void initialize_lane_widths() {
+    lane_widths.assign(240, 0); // 为0-239像素高度初始化
+
+    // 给定数据点
+    const int y1 = 170, width1 = 320;
+    const int y2 = 130, width2 = 180;
+
+    // 线性插值: width = m*y + c
+    double m = static_cast<double>(width1 - width2) / (y1 - y2);
+    double c = width1 - m * y1;
+
+    for (int y = 0; y < 240; ++y) {
+        int width = static_cast<int>(m * y + c);
+        // 边界保护
+        if (width < 1) width = 1;
+        if (width > 320) width = 320;
+        lane_widths[y] = width;
+    }
+    std::cout << "[初始化] 赛道宽度查找表生成完毕。" << std::endl;
+}
+
 // 功能: 对输入图像进行畸变校正，返回去畸变后的图像
 cv::Mat undistort(const cv::Mat &frame) 
 {
@@ -801,12 +824,20 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
 
     } else if (has_blue) {
         // --- 情况二: 只有蓝色锥桶 ---
-        // 策略: 使用所有检测到的蓝色锥桶计算平均位置
+        // 策略: 使用所有检测到的蓝色锥桶计算平均位置和平均底部高度
         float sum_blue_x = 0.0f;
+        float sum_blue_y = 0.0f;
         for (const auto& cone : blue_cones) {
             sum_blue_x += cone.rect.x + cone.rect.width / 2.0f;
+            sum_blue_y += cone.rect.y + cone.rect.height;
         }
-        float avg_blue = sum_blue_x / blue_cones.size();
+        float avg_blue_x = sum_blue_x / blue_cones.size();
+        int avg_blue_y = static_cast<int>(sum_blue_y / blue_cones.size());
+        
+        // 越界保护
+        if (avg_blue_y < 0) avg_blue_y = 0;
+        if (avg_blue_y >= lane_widths.size()) avg_blue_y = lane_widths.size() - 1;
+        int dynamic_offset = lane_widths[avg_blue_y] / 2;
 
         // 判断蓝色锥桶在左侧还是右侧
         bool is_blue_left = (cone_outer_color == 0 && last_turn_signal == 0) || 
@@ -814,20 +845,28 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
 
         if (is_blue_left) {
             // 蓝色在左侧：车道中心在蓝色右侧，目标点 = 蓝色位置 + 偏移量
-            target_x = static_cast<int>(avg_blue) + CONE_LANE_OFFSET;
+            target_x = static_cast<int>(avg_blue_x) + dynamic_offset;
         } else {
             // 蓝色在右侧：车道中心在蓝色左侧，目标点 = 蓝色位置 - 偏移量
-            target_x = static_cast<int>(avg_blue) - CONE_LANE_OFFSET;
+            target_x = static_cast<int>(avg_blue_x) - dynamic_offset;
         }
         
     } else if (has_yellow) {
         // --- 情况三: 只有黄色锥桶 ---
-        // 策略: 使用所有检测到的黄色锥桶计算平均位置
+        // 策略: 使用所有检测到的黄色锥桶计算平均位置和平均底部高度
         float sum_yellow_x = 0.0f;
+        float sum_yellow_y = 0.0f;
         for (const auto& cone : yellow_cones) {
             sum_yellow_x += cone.rect.x + cone.rect.width / 2.0f;
+            sum_yellow_y += cone.rect.y + cone.rect.height;
         }
-        float avg_yellow = sum_yellow_x / yellow_cones.size();
+        float avg_yellow_x = sum_yellow_x / yellow_cones.size();
+        int avg_yellow_y = static_cast<int>(sum_yellow_y / yellow_cones.size());
+
+        // 越界保护
+        if (avg_yellow_y < 0) avg_yellow_y = 0;
+        if (avg_yellow_y >= lane_widths.size()) avg_yellow_y = lane_widths.size() - 1;
+        int dynamic_offset = lane_widths[avg_yellow_y] / 2;
 
         // 判断黄色锥桶在左侧还是右侧
         bool is_yellow_left = (cone_outer_color == 1 && last_turn_signal == 0) || 
@@ -835,11 +874,10 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
 
         if (is_yellow_left) {
             // 黄色在左侧：车道中心在黄色右侧，目标点 = 黄色位置 + 偏移量
-            target_x = static_cast<int>(avg_yellow) + CONE_LANE_OFFSET;
+            target_x = static_cast<int>(avg_yellow_x) + dynamic_offset;
         } else {
             // 黄色在右侧：车道中心在黄色左侧，目标点 = 黄色位置 - 偏移量
-            target_x = static_cast<int>(avg_yellow) - CONE_LANE_OFFSET;
-
+            target_x = static_cast<int>(avg_yellow_x) - dynamic_offset;
         }
 
     } else {
@@ -1564,6 +1602,7 @@ int main(int argc, char* argv[])
 
     gpioTerminate();           // 终止GPIO操作
     servo_motor_pwmInit();     // 初始化舵机PWM
+    initialize_lane_widths();  // 初始化赛道宽度查找表
 
 //----------------打开摄像头------------------------------------------------
     VideoCapture capture;       // 视频捕获对象
