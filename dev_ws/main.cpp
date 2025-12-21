@@ -34,10 +34,15 @@ int number = 0; // 已处理帧计数
 bool SHOW_FPS = false; // 是否显示FPS信息，可通过命令行参数控制
 
 //------------速度参数配置------------------------------------------------------------------------------------------
-const int MOTOR_SPEED_DELTA_CRUISE = 1300; // 常规巡航速度增量
-const int MOTOR_SPEED_DELTA_AVOID = 1100;  // 避障阶段速度增量
-const int MOTOR_SPEED_DELTA_PARK = 1000;   // 车库阶段速度增量
-const int MOTOR_SPEED_DELTA_BRAKE = -3000; // 瞬时反转/刹停增量
+const int MOTOR_SPEED_DELTA_CRUISE = 1300;           // 常规巡航速度增量
+const int MOTOR_SPEED_DELTA_AVOID = 1100;            // 避障阶段速度增量
+const int MOTOR_SPEED_DELTA_POST_ZEBRA = 1300;       // 斑马线后巡线速度增量
+const int MOTOR_SPEED_DELTA_CONE_GUIDANCE = 1100;    // 锥桶引导阶段速度增量（有锥桶目标时）
+const int MOTOR_SPEED_DELTA_CONE_CRUISE = 1300;      // 锥桶引导后备巡线速度增量（无锥桶目标时）
+const int MOTOR_SPEED_DELTA_PARKING_SEARCH = 1300;   // 寻找车库速度增量（未激活A/B识别时）
+const int MOTOR_SPEED_DELTA_PARKING_FOLLOW = 1100;   // 车库跟随速度增量（已激活A/B识别时）
+const int MOTOR_SPEED_DELTA_PRE_PARKING = 1100;      // 预入库阶段速度增量
+const int MOTOR_SPEED_DELTA_BRAKE = -3000;           // 瞬时反转/刹停增量
 
 //------------时间参数配置（单位：秒）------------------------------------------------------------------------------------------
 const float BRIEF_STOP_REVERSE_DURATION = 0.5f; // 反转阶段持续时间（秒）
@@ -47,7 +52,8 @@ const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时
 const float POST_ZEBRA_DELAY_SECONDS = 1.0f;        // 斑马线后巡线延迟时间（秒）
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
 const float LANE_CHANGE_DURATION_SECONDS = 1.5f;    // 变道持续时间（秒）
-const int SERVO_PWM_LEFT_TURN = 760;                // 左转PWM值
+const float POST_CONE_CRUISE_DURATION_SECONDS = 3.0f; // 锥桶引导后巡线延迟时间（秒）
+const int SERVO_PWM_LEFT_TURN = 780;                // 左转PWM值
 const int SERVO_PWM_RIGHT_TURN = 690;               // 右转PWM值
 const int MOTOR_SPEED_DELTA_LANE_CHANGE = 1300;     // 变道速度增量
 
@@ -65,8 +71,10 @@ enum class CarState {
     PostZebra,      // 斑马线后恢复
     LaneChange,     // 变道
     ConeGuidance,   // 引导锥桶区域
-    ParkingSearch,  // 寻找车库
-    BriefStop,      // 短暂停车（反转）
+    ParkingApproachDetection,  // 蓝框（蓝点）识别
+    ParkingSearch,  // AB识别和计数
+    BriefStopForABActivation,  // 激活AB识别前的停车
+    BriefStopForParking,       // 入库前停车（进行AB识别和计数）
     PreParking,     // 预入库（最终接近）
     ParkingComplete // 完成
 };
@@ -84,8 +92,10 @@ std::string carStateToString(CarState state) {
         case CarState::PostZebra:      return "PostZebra (斑马线后恢复)";
         case CarState::LaneChange:     return "LaneChange (变道)";
         case CarState::ConeGuidance:    return "ConeGuidance (引导锥桶区域)";
-        case CarState::ParkingSearch:  return "ParkingSearch (寻找车库)";
-        case CarState::BriefStop:      return "BriefStop (短暂停车)";
+        case CarState::ParkingApproachDetection: return "ParkingApproachDetection (蓝框识别)";
+        case CarState::ParkingSearch:  return "ParkingSearch (AB识别)";
+        case CarState::BriefStopForABActivation: return "BriefStopForABActivation (激活AB识别前停车)";
+        case CarState::BriefStopForParking:      return "BriefStopForParking (入库前停车)";
         case CarState::PreParking:     return "PreParking (预入库)";
         case CarState::ParkingComplete: return "ParkingComplete (完成)";
         default:                       return "Unknown";
@@ -171,12 +181,6 @@ float servo_pwm_diff; // 存储舵机PWM差值
 float servo_pwm; // 存储舵机PWM值
 
 //----------------避障相关---------------------------------------------------
-// 新增：避障预警相关
-bool obstacle_detection_active = false; // 是否已激活精细障碍物检测（详查阶段）
-const double PRE_AVOIDANCE_BLUE_AREA_MIN = 60.0; // 预警阶段检测到的最小蓝色面积
-const int PRE_OBSTACLE_DETECT_THRESHOLD = 5; // 连续检测到N帧蓝框才确认
-int pre_obstacle_detect_count = 0; // 蓝框预警连续检测计数
-
 enum class AvoidanceDirection {
     Auto,        // 自动判断: 障碍物在右，向左避；障碍物在左，向右避
     ForceLeft,   // 强制向左避障
@@ -226,31 +230,32 @@ int flag_turn_done = 0; // 转向完成标志
 std::chrono::steady_clock::time_point zebra_stop_start_time;
 std::chrono::steady_clock::time_point post_zebra_delay_start_time; // 斑马线后延迟计时器
 std::chrono::steady_clock::time_point lane_change_start_time;      // 变道计时器
+std::chrono::steady_clock::time_point post_cone_cruise_start_time; // 锥桶引导后巡线延迟计时器
 int turn_signal_label = -1;                                        // 转向标志 (0=left, 1=right)
 
 // ----------------锥桶引导相关---------------------------------------------------
 int cone_outer_color = 1; // 0=蓝色为外侧边界, 1=黄色为外侧边界
 const int CONE_LANE_OFFSET = 90; // 锥桶单侧补全偏移量（像素）
 const int CONE_ENTER_THRESHOLD = 5; // 确认锥桶出现的帧数阈值
-const int CONE_BOTTOM_Y_THRESHOLD = 120; // 进入锥桶引导的底部高度阈值
+const int CONE_BOTTOM_Y_THRESHOLD = 140; // 进入锥桶引导的底部高度阈值
 const int CONE_EXIT_THRESHOLD = 3; // 确认锥桶消失的帧数阈值
 bool has_seen_cones = false; // 是否已确认进入锥桶引导模式
 int cones_detect_count = 0; // 锥桶连续检测计数
 int cones_lost_count = 0; // 锥桶连续丢失计数
 int cone_target_x = -1; // 锥桶引导目标点X坐标（-1表示未检测到）
+bool need_post_cone_cruise_delay = false; // 是否需要锥桶引导后巡线延迟
+bool from_cone_guidance = false; // 是否从锥桶引导来的（用于区分处理逻辑）
 
 //---------------入库相关------------------------------------------
-bool brief_stop_for_ab_detection = false; // 标志位：是否是为了激活A/B识别而执行的短暂停车
 
 // 新增：入库前蓝点引导相关
 const int PARKING_APPROACH_ROI_X = 10;
-const int PARKING_APPROACH_ROI_Y = 80;
+const int PARKING_APPROACH_ROI_Y = 85;
 const int PARKING_APPROACH_ROI_WIDTH = 300;
 const int PARKING_APPROACH_ROI_HEIGHT = 100;
-const double PARKING_APPROACH_BLUE_AREA_MIN = 50.0; // 判定为接近车库需要的最小蓝色面积
-const int PARKING_APPROACH_CONFIRM_THRESHOLD = 3; // 连续检测到N帧才确认
+const double PARKING_APPROACH_BLUE_AREA_MIN = 30.0; // 判定为接近车库需要的最小蓝色面积
+const int PARKING_APPROACH_CONFIRM_THRESHOLD = 2; // 连续检测到N帧才确认
 int parking_approach_detect_count = 0; // 蓝点接近区域连续检测计数
-bool parking_ab_detection_active = false; // 是否已激活A/B标识别
 
 int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
 int park_A_count = 0; // A车库累计识别次数
@@ -501,7 +506,7 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
         }
         else if (state == CarState::ConeGuidance && has_seen_cones)
         {
-            angle_threshold = 35.0f;
+            angle_threshold = 60.0f;
         }
 
         if (std::abs(angle) > angle_threshold && length > 8)
@@ -1081,9 +1086,9 @@ bool detect_parking_approach_points(cv::Mat &frame) {
     Scalar scalarH = Scalar(BLUE_H_MAX, BLUE_S_MAX, BLUE_V_MAX);
     inRange(hsvRoi, scalarl, scalarH, mask);
 
-    // 3. 形态学开运算去噪
-    cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, openKernel);
+    // 3. 形态学闭运算连接区域，消除白色箭头/字母分割造成的影响
+    cv::Mat closeKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
+    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, closeKernel, Point(-1, -1), 3);
     
     // 4. 查找轮廓并找出最大面积
     std::vector<std::vector<cv::Point>> contours;
@@ -1242,7 +1247,7 @@ float servo_pd_cone(int target_x) {
     // 如果 lane_center_x > 160 (在右边)，error < 0，需要右转（根据舵机方向调整）
     
     // 使用与常规巡线相似的参数
-    float kp = 0.8; 
+    float kp = 0.6; 
     float kd = 3.5; 
 
     error_first = target - pidx; 
@@ -1288,7 +1293,7 @@ float servo_pd_cone_cruise(int target) {
     }
     int pidx = int((mid[23].x + mid[25].x) / 2);
 
-    float kp = 0.8; 
+    float kp = 0.6; 
     float kd = 3.5; 
 
     error_first = target - pidx;
@@ -1390,60 +1395,6 @@ int decide_parking_label_from_counts()
 }
 
 
-// 功能: 在避障ROI内检测是否存在蓝色物体（预警）
-bool detect_pre_avoidance_blue_box(cv::Mat &frame) {
-    // 1. 裁剪ROI (使用避障的Y轴范围)
-    const int ROI_X = 0;
-    const int ROI_Y = BZ_Y_LOWER_THRESHOLD; // 40
-    const int ROI_WIDTH = frame.cols;
-    const int ROI_HEIGHT = BZ_Y_UPPER_THRESHOLD - BZ_Y_LOWER_THRESHOLD; // 200 - 40 = 160
-
-    int roiWidth = std::min(ROI_WIDTH, frame.cols - ROI_X);
-    int roiHeight = std::min(ROI_HEIGHT, frame.rows - ROI_Y);
-    if (roiWidth <= 0 || roiHeight <= 0) {
-        return false; // ROI无效
-    }
-    cv::Rect roiRect(ROI_X, ROI_Y, roiWidth, roiHeight);
-    cv::Mat roiFrame = frame(roiRect);
-
-    // 2. 转换到HSV并进行阈值分割
-    cv::Mat hsvRoi;
-    cv::cvtColor(roiFrame, hsvRoi, cv::COLOR_BGR2HSV);
-    
-    cv::Mat mask;
-    Scalar scalarl = Scalar(BLUE_H_MIN, BLUE_S_MIN, BLUE_V_MIN);
-    Scalar scalarH = Scalar(BLUE_H_MAX, BLUE_S_MAX, BLUE_V_MAX);
-    inRange(hsvRoi, scalarl, scalarH, mask);
-
-    // 3. 形态学开运算去噪
-    cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, openKernel);
-    
-    // 4. 查找轮廓并找出最大面积
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-
-    if (contours.empty()) {
-        return false;
-    }
-
-    // 按面积排序并获取最大面积
-    sort(contours.begin(), contours.end(), Contour_Area);
-    double max_area = contourArea(contours[0]);
-
-    // 5. 最终判定
-    if (max_area >= PRE_AVOIDANCE_BLUE_AREA_MIN) {
-        cout << "[避障预警] 检测到蓝色物体 (最大面积: " << (int)max_area << ")" << endl;
-        return true;
-    } else if (max_area > 10.0) {
-        // 面积大于10但不满足阈值，也打印信息
-        cout << "[避障预警] 检测到小面积蓝色物体 (最大面积: " << (int)max_area << ", 阈值: " << (int)PRE_AVOIDANCE_BLUE_AREA_MIN << ")" << endl;
-    }
-    
-    return false;
-}
-
-
 // 控制舵机电机
 // 功能: 根据状态机切换控制策略（巡线/避障/停车），并下发PWM
 void motor_servo_contral()
@@ -1464,7 +1415,8 @@ void motor_servo_contral()
             gpioPWM(servo_pin, servo_pwm_mid);
             return;
 
-        case CarState::BriefStop:
+        case CarState::BriefStopForABActivation:
+        case CarState::BriefStopForParking:
             {
                 // 计算短暂停车已持续的时间
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1486,26 +1438,25 @@ void motor_servo_contral()
         case CarState::PreParking:
             // 状态：预入库阶段 - 跟随最远的A或B目标
             servo_pwm_now = servo_pd_parking(parking_follow_x);
-            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PRE_PARKING);
+            break;
+
+        case CarState::ParkingApproachDetection:
+            // 状态：蓝框识别，使用寻找车库速度
+            servo_pwm_now = servo_pd_parking_cruise(160);
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARKING_SEARCH);
             break;
 
         case CarState::ParkingSearch:
-            // 状态：寻找并进入车库
-            if (parking_ab_detection_active) {
-                // 已激活A/B识别，使用慢速前进
-                if (latest_park_id != 0) {
-                    // 已识别到车库，跟随最近的A或B标识
-                    servo_pwm_now = servo_pd_parking(parking_follow_x); 
-                } else {
-                    // 未识别到车库，平缓巡线
-                    servo_pwm_now = servo_pd_parking_cruise(160);
-                }
-                gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
+            // 状态：AB识别和计数，使用慢速前进
+            if (latest_park_id != 0) {
+                // 已识别到车库，跟随最近的A或B标识
+                servo_pwm_now = servo_pd_parking(parking_follow_x); 
             } else {
-                // 未激活A/B识别（正在寻找蓝色引导区），使用常规巡航速度
+                // 未识别到车库，平缓巡线
                 servo_pwm_now = servo_pd_parking_cruise(160);
-                gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE);
             }
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARKING_FOLLOW);
             break;
 
         case CarState::Avoidance:
@@ -1531,11 +1482,11 @@ void motor_servo_contral()
             if (cone_target_x != -1) {
                 // 如果计算出了锥桶目标，使用专门的锥桶PD控制
                 servo_pwm_now = servo_pd_cone(cone_target_x);
-                gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_AVOID);
+                gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CONE_GUIDANCE);
             } else {
                 // 否则使用为锥桶引导优化的平缓巡线参数
                 servo_pwm_now = servo_pd_cone_cruise(160);
-                gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE);
+                gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CONE_CRUISE);
 
             }
             break;
@@ -1543,19 +1494,13 @@ void motor_servo_contral()
         case CarState::Cruise:
             // 状态：常规巡线（包括寻找斑马线或避障间隙）
             servo_pwm_now = servo_pd(160); // 使用常规PD控制
-            if (obstacle_detection_active) {
-                // 在“详查”阶段，降速
-                gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_AVOID);
-            } else {
-                // 在“预警”阶段，正常巡航
-                gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE);
-            }
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE); // 使用常规速度
             break;
 
         case CarState::PostZebra:
             // 状态：常规巡线（包括寻找斑马线或避障间隙）
             servo_pwm_now = servo_pd_post_zebra(160); // 使用常规PD控制
-            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE); // 使用常规速度
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_POST_ZEBRA); // 使用斑马线后巡线速度
             break;
             
         default:
@@ -1694,7 +1639,7 @@ int main(int argc, char* argv[])
                     blue_card_remove();
                 }
             }
-            else if (current_state != CarState::ParkingComplete && current_state != CarState::BriefStop && current_state != CarState::PreParking) 
+            else if (current_state != CarState::ParkingComplete && current_state != CarState::BriefStopForABActivation && current_state != CarState::BriefStopForParking && current_state != CarState::PreParking) 
             {
                 // 发车后的状态，累加帧计数
                 number++; 
@@ -1741,106 +1686,82 @@ int main(int argc, char* argv[])
                         turn_left_count = 0;
                         turn_right_count = 0;
                         turn_signal_label = -1;
-                        obstacle_detection_active = false; // 经过斑马线后重置避障预警状态
-                        pre_obstacle_detect_count = 0;
                         setCarState(CarState::ZebraStop);
                     }
                 }
                 else // 检查障碍物
                 {
-                    if (!obstacle_detection_active)
-                    {
-                        // 阶段一：蓝框预警
-                        if (detect_pre_avoidance_blue_box(frame)) {
-                            pre_obstacle_detect_count++;
-                            cout << "[避障预警] 发现潜在障碍, 计数: " << pre_obstacle_detect_count << "/" << PRE_OBSTACLE_DETECT_THRESHOLD << endl;
-                        } else {
-                            if (pre_obstacle_detect_count > 0) {
-                               cout << "[避障预警] 潜在障碍丢失, 重置计数" << endl;
-                            }
-                            pre_obstacle_detect_count = 0;
-                        }
+                    result = fastestdet_obs->detect(frame);
+                    bool obstacle_found_this_frame = false;
+                    DetectObject blue_box;
 
-                        if (pre_obstacle_detect_count >= PRE_OBSTACLE_DETECT_THRESHOLD) {
-                            cout << "[流程] 确认预警, 降速并激活精确检测" << endl;
-                            obstacle_detection_active = true;
+                    if (!result.empty()) {
+                        // 查找蓝色障碍物（label=0，且在有效高度范围内）
+                        for (const auto& box : result) {
+                            int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
+                            if (box.label == 0 && box.prob > 0.6f &&
+                                box_y2 < BZ_Y_UPPER_THRESHOLD && box_y2 > BZ_Y_LOWER_THRESHOLD) {
+                                obstacle_found_this_frame = true;
+                                blue_box = box;
+                                break;
+                            }
                         }
                     }
-                    else
-                    {
-                        // 阶段二：精确检测
-                        result = fastestdet_obs->detect(frame);
-                        bool obstacle_found_this_frame = false;
-                        DetectObject blue_box;
 
-                        if (!result.empty()) {
-                            // 查找蓝色障碍物（label=0，且在有效高度范围内）
-                            for (const auto& box : result) {
-                                int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
-                                if (box.label == 0 && box.prob > 0.6f &&
-                                    box_y2 < BZ_Y_UPPER_THRESHOLD && box_y2 > BZ_Y_LOWER_THRESHOLD) {
-                                    obstacle_found_this_frame = true;
-                                    blue_box = box;
-                                    break;
-                                }
-                            }
+                    if (obstacle_found_this_frame) {
+                        // 检测到障碍物，累加计数
+                        bz_detect_count++;
+                        cout << "[避障检测] 发现蓝色障碍物，计数: " << bz_detect_count << "/" << BZ_DETECT_THRESHOLD << endl;
+                    } else {
+                        // 未检测到障碍物，重置计数
+                        if (bz_detect_count > 0) cout << "[避障检测] 障碍物消失，重置计数" << endl;
+                        bz_detect_count = 0;
+                    }
+
+                    // 连续检测到足够帧数，确认障碍物并进入避障模式
+                    if (bz_detect_count >= BZ_DETECT_THRESHOLD) {
+                        cout << "[流程] 确认蓝色障碍物，进入避障模式" << endl;
+                        setCarState(CarState::Avoidance);
+                        
+                        // 初始化避障相关参数
+                        int box_y2 = static_cast<int>(blue_box.rect.y + blue_box.rect.height);
+                        int box_x1 = static_cast<int>(blue_box.rect.x);
+                        int box_x2 = static_cast<int>(blue_box.rect.x + blue_box.rect.width);
+                        int box_y1 = static_cast<int>(blue_box.rect.y);
+                        last_known_bz_xcenter = (box_x1 + box_x2) / 2;
+                        last_known_bz_x1 = box_x1;
+                        last_known_bz_x2 = box_x2;
+                        last_known_bz_bottom = box_y2;
+                        last_known_bz_heighest = box_y1;
+                        bz_heighest = last_known_bz_heighest;
+
+                        // 执行第一次补线操作
+                        // 根据避障策略决定补线方向
+                        bool avoid_left;
+                        switch (AVOIDANCE_STRATEGY) {
+                            case AvoidanceDirection::ForceLeft:
+                                avoid_left = true;
+                                break;
+                            case AvoidanceDirection::ForceRight:
+                                avoid_left = false;
+                                break;
+                            case AvoidanceDirection::Auto:
+                            default:
+                                // 自动模式：基于障碍物位置判断
+                                avoid_left = (last_known_bz_xcenter > 160); 
+                                break;
                         }
 
-                        if (obstacle_found_this_frame) {
-                            // 检测到障碍物，累加计数
-                            bz_detect_count++;
-                            cout << "[避障检测] 发现蓝色障碍物，计数: " << bz_detect_count << "/" << BZ_DETECT_THRESHOLD << endl;
+                        // 执行补线
+                        if (avoid_left) {
+                            // 向左避障: 在障碍物左侧补线，引导车辆向左
+                            bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x1, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
                         } else {
-                            // 未检测到障碍物，重置计数
-                            if (bz_detect_count > 0) cout << "[避障检测] 障碍物消失，重置计数" << endl;
-                            bz_detect_count = 0;
+                            // 向右避障: 在障碍物右侧补线，引导车辆向右
+                            bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x2, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
                         }
-
-                        // 连续检测到足够帧数，确认障碍物并进入避障模式
-                        if (bz_detect_count >= BZ_DETECT_THRESHOLD) {
-                            cout << "[流程] 确认蓝色障碍物，进入避障模式" << endl;
-                            setCarState(CarState::Avoidance);
-                            
-                            // 初始化避障相关参数
-                            int box_y2 = static_cast<int>(blue_box.rect.y + blue_box.rect.height);
-                            int box_x1 = static_cast<int>(blue_box.rect.x);
-                            int box_x2 = static_cast<int>(blue_box.rect.x + blue_box.rect.width);
-                            int box_y1 = static_cast<int>(blue_box.rect.y);
-                            last_known_bz_xcenter = (box_x1 + box_x2) / 2;
-                            last_known_bz_x1 = box_x1;
-                            last_known_bz_x2 = box_x2;
-                            last_known_bz_bottom = box_y2;
-                            last_known_bz_heighest = box_y1;
-                            bz_heighest = last_known_bz_heighest;
-
-                            // 执行第一次补线操作
-                            // 根据避障策略决定补线方向
-                            bool avoid_left;
-                            switch (AVOIDANCE_STRATEGY) {
-                                case AvoidanceDirection::ForceLeft:
-                                    avoid_left = true;
-                                    break;
-                                case AvoidanceDirection::ForceRight:
-                                    avoid_left = false;
-                                    break;
-                                case AvoidanceDirection::Auto:
-                                default:
-                                    // 自动模式：基于障碍物位置判断
-                                    avoid_left = (last_known_bz_xcenter > 160); 
-                                    break;
-                            }
-
-                            // 执行补线
-                            if (avoid_left) {
-                                // 向左避障: 在障碍物左侧补线，引导车辆向左
-                                bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x1, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
-                            } else {
-                                // 向右避障: 在障碍物右侧补线，引导车辆向右
-                                bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x2, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
-                            }
-                            Tracking_bz(bin_image); 
-                            bz_detect_count = 0; // 重置计数器，避免重复进入
-                        }
+                        Tracking_bz(bin_image); 
+                        bz_detect_count = 0; // 重置计数器，避免重复进入
                     }
                 }
                 break;
@@ -1913,8 +1834,6 @@ int main(int argc, char* argv[])
                         cout << "[流程] 障碍物已安全绕过，退出避障模式" << endl;
                         count_bz++;
                         bz_disappear_count = 0;
-                        obstacle_detection_active = false; // 重置预警状态
-                        pre_obstacle_detect_count = 0;
                         setCarState(CarState::Cruise);
                     }
                 }
@@ -1972,10 +1891,10 @@ int main(int argc, char* argv[])
                              lane_change_start_time = std::chrono::steady_clock::now();
                              setCarState(CarState::LaneChange);
                         } else {
-                             cout << "[流程] " << static_cast<int>(POST_ZEBRA_DELAY_SECONDS) << "秒巡线结束，未检测到转向标志，直接开始寻找并识别A/B车库" << endl;
-                             parking_ab_detection_active = false;
+                             cout << "[流程] " << static_cast<int>(POST_ZEBRA_DELAY_SECONDS) << "秒巡线结束，未检测到转向标志，开始蓝框识别" << endl;
                              parking_approach_detect_count = 0;
-                             setCarState(CarState::ParkingSearch);
+                             from_cone_guidance = false; // 确保标志为false（从PostZebra路径来）
+                             setCarState(CarState::ParkingApproachDetection);
                         }
                     }
                 }
@@ -2056,39 +1975,127 @@ int main(int argc, char* argv[])
                 }
                 
                 if (has_seen_cones && cones_lost_count >= CONE_EXIT_THRESHOLD) {
-                    cout << "[流程] 通过锥桶区域，开始寻找A/B车库" << endl;
-                    parking_ab_detection_active = false;
+                    cout << "[流程] 通过锥桶区域，开始" << static_cast<int>(POST_CONE_CRUISE_DURATION_SECONDS) << "秒巡线延迟..." << endl;
                     parking_approach_detect_count = 0;
-                    setCarState(CarState::ParkingSearch);
+                    post_cone_cruise_start_time = std::chrono::steady_clock::now(); // 启动锥桶引导后巡线延迟计时器
+                    need_post_cone_cruise_delay = true; // 设置延迟标志
+                    from_cone_guidance = true; // 标记来自锥桶引导
+                    setCarState(CarState::ParkingApproachDetection);
+                }
+                break;
+
+            case CarState::ParkingApproachDetection:
+                // 蓝框（蓝点）识别状态
+                Tracking(bin_image);
+
+                // 检查是否在锥桶引导后的巡线延迟时间内
+                if (need_post_cone_cruise_delay) {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - post_cone_cruise_start_time).count() / 1000000.0;
+                    if (elapsed < POST_CONE_CRUISE_DURATION_SECONDS) {
+                        // 在延迟时间内，只执行巡线，不进行任何检测
+                        break; // 直接退出，不执行后续检测逻辑
+                    } else {
+                        // 延迟时间结束，开启蓝框检测
+                        cout << "[流程] " << static_cast<int>(POST_CONE_CRUISE_DURATION_SECONDS) << "秒巡线延迟结束，开始蓝框检测..." << endl;
+                        need_post_cone_cruise_delay = false; // 清除延迟标志，继续执行后续蓝框检测逻辑
+                    }
+                }
+
+                // 检测蓝点（蓝框）
+                if (detect_parking_approach_points(frame)) {
+                    parking_approach_detect_count++;
+                    cout << "[蓝框识别] 检测到引导蓝点, 计数: " << parking_approach_detect_count << "/" << PARKING_APPROACH_CONFIRM_THRESHOLD << endl;
+                } else {
+                    if (parking_approach_detect_count > 0) {
+                       cout << "[蓝框识别] 引导蓝点丢失, 重置计数" << endl;
+                    }
+                    parking_approach_detect_count = 0;
+                }
+
+                if (parking_approach_detect_count >= PARKING_APPROACH_CONFIRM_THRESHOLD) {
+                    // 蓝框检测有效后，进入BriefStopForABActivation状态，停车后再激活AB识别
+                    cout << "[流程] 蓝框检测有效，准备执行短暂停车以稳定车辆" << endl;
+                    brief_stop_start_time = std::chrono::steady_clock::now();
+                    from_cone_guidance = false; // 清除标志（不再需要区分）
+                    setCarState(CarState::BriefStopForABActivation);
                 }
                 break;
 
             case CarState::ParkingSearch:
+                // AB识别和计数状态
                 Tracking(bin_image);
 
-                if (!parking_ab_detection_active)
+                // 执行A/B识别逻辑
+                result_ab.clear();
+                result_ab = fastestdet_ab->detect(frame);
                 {
-                    // 阶段一：检测蓝点
-                    if (detect_parking_approach_points(frame)) {
-                        parking_approach_detect_count++;
-                        cout << "[入库搜索] 检测到引导蓝点, 计数: " << parking_approach_detect_count << "/" << PARKING_APPROACH_CONFIRM_THRESHOLD << endl;
-                    } else {
-                        if (parking_approach_detect_count > 0) {
-                           cout << "[入库搜索] 引导蓝点丢失, 重置计数" << endl;
+                    // 初始化最近检测框（用于查找最近的A/B标识）
+                    DetectObject closest_box = {cv::Rect_<float>(0, 0, 0, 0), -1, 0.0f};
+                    if (!result_ab.empty()) {
+                        // 查找最近的A/B标识（y2最大，且满足阈值要求）
+                        for(const auto& box : result_ab) {
+                            float box_y2 = box.rect.y + box.rect.height;
+                            if (box_y2 > BZ_Y_LOWER_THRESHOLD) {
+                                float closest_y2 = closest_box.rect.y + closest_box.rect.height;
+                                if (box_y2 > closest_y2) closest_box = box;
+                            }
                         }
-                        parking_approach_detect_count = 0;
                     }
 
-                    if (parking_approach_detect_count >= PARKING_APPROACH_CONFIRM_THRESHOLD) {
-                        cout << "[流程] 确认接近停车场, 准备执行短暂停车以稳定车辆" << endl;
-                        brief_stop_for_ab_detection = true; // 设置标志位
-                        brief_stop_start_time = std::chrono::steady_clock::now();
-                        setCarState(CarState::BriefStop);
+                    if (closest_box.label != -1) {
+                        // 累加A/B车库识别计数
+                        if (closest_box.label == 0) park_A_count++;
+                        else if (closest_box.label == 1) park_B_count++;
+
+                        // 更新最近检测到的车库信息和跟随坐标
+                        float closest_y2 = closest_box.rect.y + closest_box.rect.height;
+                        latest_park_id = closest_box.label + 1;
+                        float target_x = closest_box.rect.x + closest_box.rect.width / 2.0f;
+                        parking_follow_x = static_cast<int>(target_x);
+
+                        cout << "[AB识别] 最近: " << (latest_park_id == 1 ? "A" : "B") 
+                             << " | 计数 A:" << park_A_count << ", B:" << park_B_count
+                             << " | Y:" << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD
+                             << " | 跟随x:" << parking_follow_x << endl;
+
+                        // 检查是否达到入库阈值
+                        if (closest_y2 >= PARKING_Y_THRESHOLD) {
+                            cout << "[流程] 达到入库阈值，触发短暂停车，位置 x=" << parking_follow_x << endl;
+                            pending_pre_parking_label = -1;
+                            brief_stop_start_time = std::chrono::steady_clock::now();
+                            setCarState(CarState::BriefStopForParking);
+                        }
+                    } else {
+                        // 未检测到有效目标，重置车库ID
+                        latest_park_id = 0;
                     }
                 }
-                else
+                break;
+
+            case CarState::BriefStopForABActivation:
+                // 激活AB识别前的停车，不进行AB识别和计数
+                // motor_servo_contral会处理反转和刹停
                 {
-                    // 阶段二：执行原有的A/B识别逻辑
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - brief_stop_start_time).count() / 1000.0f;
+                    
+                    if (elapsed >= (BRIEF_STOP_REVERSE_DURATION + BRIEF_STOP_HOLD_DURATION)) {
+                        // 停车时间结束，激活AB识别并进入ParkingSearch状态
+                        cout << "[流程] 短暂停车结束，减速并激活A/B识别" << endl;
+                        from_cone_guidance = false; // 确保标志为false（从BriefStopForABActivation路径来）
+                        setCarState(CarState::ParkingSearch);
+                    }
+                }
+                break;
+
+            case CarState::BriefStopForParking:
+                // 入库前停车，在停车期间继续AB识别和计数
+                // motor_servo_contral会处理反转和刹停
+                {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - brief_stop_start_time).count() / 1000.0f;
+                    
+                    // 在停车期间（未达到停车时间）或停车时间结束后，继续AB识别和计数
                     result_ab.clear();
                     result_ab = fastestdet_ab->detect(frame);
                     {
@@ -2120,57 +2127,32 @@ int main(int argc, char* argv[])
                                  << " | 计数 A:" << park_A_count << ", B:" << park_B_count
                                  << " | Y:" << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD
                                  << " | 跟随x:" << parking_follow_x << endl;
-
-                            // 检查是否达到入库阈值
-                            if (closest_y2 >= PARKING_Y_THRESHOLD) {
-                                cout << "[流程] 达到入库阈值，触发短暂停车，位置 x=" << parking_follow_x << endl;
-                                pending_pre_parking_label = -1;
-                                brief_stop_start_time = std::chrono::steady_clock::now();
-                                setCarState(CarState::BriefStop);
-                            }
                         } else {
                             // 未检测到有效目标，重置车库ID
                             latest_park_id = 0;
                         }
                     }
-                }
-                break;
-
-            case CarState::BriefStop:
-                // 在短暂停车期间，不进行新的视觉处理，等待电机动作完成
-                // motor_servo_contral会处理反转和刹停
-                {
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - brief_stop_start_time).count() / 1000.0f;
                     
                     if (elapsed >= (BRIEF_STOP_REVERSE_DURATION + BRIEF_STOP_HOLD_DURATION)) {
-                        if (brief_stop_for_ab_detection) {
-                            // 情况一：为了开始A/B识别而停车
-                            cout << "[流程] 短暂停车结束，减速并激活A/B识别" << endl;
-                            parking_ab_detection_active = true;
-                            brief_stop_for_ab_detection = false; // 重置标志位
-                            setCarState(CarState::ParkingSearch);
-                        } else {
-                            // 情况二：常规的入库前停车
-                            int decided_label = pending_pre_parking_label;
-                            if (decided_label == -1) decided_label = decide_parking_label_from_counts();
+                        // 停车时间结束后，根据计数决定入库方向
+                        int decided_label = pending_pre_parking_label;
+                        if (decided_label == -1) decided_label = decide_parking_label_from_counts();
 
-                            if (decided_label != -1) {
-                                // 成功确定目标车库，进入预入库阶段
-                                final_target_label = decided_label;
-                                parking_target_not_detected_count = 0;
-                                parking_target_detected_this_frame = false;
-                                
-                                cout << "[流程] 短暂停车结束，开始预入库 -> "
-                                     << (final_target_label == 0 ? "A(左)" : "B(右)") << endl;
-                                setCarState(CarState::PreParking);
-                            } else {
-                                // 无法确认目标，继续寻找
-                                cout << "[警告] 无法确认A/B，继续寻找" << endl;
-                                parking_ab_detection_active = true; // 直接重新尝试A/B识别
-                                parking_approach_detect_count = 0;
-                                setCarState(CarState::ParkingSearch);
-                            }
+                        if (decided_label != -1) {
+                            // 成功确定目标车库，进入预入库阶段
+                            final_target_label = decided_label;
+                            parking_target_not_detected_count = 0;
+                            parking_target_detected_this_frame = false;
+                            
+                            cout << "[流程] 短暂停车结束，开始预入库 -> "
+                                 << (final_target_label == 0 ? "A(左)" : "B(右)") << endl;
+                            setCarState(CarState::PreParking);
+                        } else {
+                            // 无法确认目标，重新开始蓝框识别
+                            cout << "[警告] 无法确认A/B，重新开始蓝框识别" << endl;
+                            parking_approach_detect_count = 0;
+                            from_cone_guidance = false; // 确保标志为false（从BriefStopForParking路径来）
+                            setCarState(CarState::ParkingApproachDetection);
                         }
                     }
                 }
