@@ -171,6 +171,12 @@ float servo_pwm_diff; // 存储舵机PWM差值
 float servo_pwm; // 存储舵机PWM值
 
 //----------------避障相关---------------------------------------------------
+// 新增：避障预警相关
+bool obstacle_detection_active = false; // 是否已激活精细障碍物检测（详查阶段）
+const double PRE_AVOIDANCE_BLUE_AREA_MIN = 60.0; // 预警阶段检测到的最小蓝色面积
+const int PRE_OBSTACLE_DETECT_THRESHOLD = 5; // 连续检测到N帧蓝框才确认
+int pre_obstacle_detect_count = 0; // 蓝框预警连续检测计数
+
 enum class AvoidanceDirection {
     Auto,        // 自动判断: 障碍物在右，向左避；障碍物在左，向右避
     ForceLeft,   // 强制向左避障
@@ -1384,6 +1390,60 @@ int decide_parking_label_from_counts()
 }
 
 
+// 功能: 在避障ROI内检测是否存在蓝色物体（预警）
+bool detect_pre_avoidance_blue_box(cv::Mat &frame) {
+    // 1. 裁剪ROI (使用避障的Y轴范围)
+    const int ROI_X = 0;
+    const int ROI_Y = BZ_Y_LOWER_THRESHOLD; // 40
+    const int ROI_WIDTH = frame.cols;
+    const int ROI_HEIGHT = BZ_Y_UPPER_THRESHOLD - BZ_Y_LOWER_THRESHOLD; // 200 - 40 = 160
+
+    int roiWidth = std::min(ROI_WIDTH, frame.cols - ROI_X);
+    int roiHeight = std::min(ROI_HEIGHT, frame.rows - ROI_Y);
+    if (roiWidth <= 0 || roiHeight <= 0) {
+        return false; // ROI无效
+    }
+    cv::Rect roiRect(ROI_X, ROI_Y, roiWidth, roiHeight);
+    cv::Mat roiFrame = frame(roiRect);
+
+    // 2. 转换到HSV并进行阈值分割
+    cv::Mat hsvRoi;
+    cv::cvtColor(roiFrame, hsvRoi, cv::COLOR_BGR2HSV);
+    
+    cv::Mat mask;
+    Scalar scalarl = Scalar(BLUE_H_MIN, BLUE_S_MIN, BLUE_V_MIN);
+    Scalar scalarH = Scalar(BLUE_H_MAX, BLUE_S_MAX, BLUE_V_MAX);
+    inRange(hsvRoi, scalarl, scalarH, mask);
+
+    // 3. 形态学开运算去噪
+    cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
+    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, openKernel);
+    
+    // 4. 查找轮廓并找出最大面积
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+    if (contours.empty()) {
+        return false;
+    }
+
+    // 按面积排序并获取最大面积
+    sort(contours.begin(), contours.end(), Contour_Area);
+    double max_area = contourArea(contours[0]);
+
+    // 5. 最终判定
+    if (max_area >= PRE_AVOIDANCE_BLUE_AREA_MIN) {
+        cout << "[避障预警] 检测到蓝色物体 (最大面积: " << (int)max_area << ")" << endl;
+        return true;
+    } else if (max_area > 10.0) {
+        // 面积大于10但不满足阈值，也打印信息
+        cout << "[避障预警] 检测到小面积蓝色物体 (最大面积: " << (int)max_area << ", 阈值: " << (int)PRE_AVOIDANCE_BLUE_AREA_MIN << ")" << endl;
+    }
+    
+    return false;
+}
+
+
 // 控制舵机电机
 // 功能: 根据状态机切换控制策略（巡线/避障/停车），并下发PWM
 void motor_servo_contral()
@@ -1483,7 +1543,13 @@ void motor_servo_contral()
         case CarState::Cruise:
             // 状态：常规巡线（包括寻找斑马线或避障间隙）
             servo_pwm_now = servo_pd(160); // 使用常规PD控制
-            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE); // 使用常规速度
+            if (obstacle_detection_active) {
+                // 在“详查”阶段，降速
+                gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_AVOID);
+            } else {
+                // 在“预警”阶段，正常巡航
+                gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE);
+            }
             break;
 
         case CarState::PostZebra:
@@ -1675,82 +1741,106 @@ int main(int argc, char* argv[])
                         turn_left_count = 0;
                         turn_right_count = 0;
                         turn_signal_label = -1;
+                        obstacle_detection_active = false; // 经过斑马线后重置避障预警状态
+                        pre_obstacle_detect_count = 0;
                         setCarState(CarState::ZebraStop);
                     }
                 }
                 else // 检查障碍物
                 {
-                    result = fastestdet_obs->detect(frame);
-                    bool obstacle_found_this_frame = false;
-                    DetectObject blue_box;
+                    if (!obstacle_detection_active)
+                    {
+                        // 阶段一：蓝框预警
+                        if (detect_pre_avoidance_blue_box(frame)) {
+                            pre_obstacle_detect_count++;
+                            cout << "[避障预警] 发现潜在障碍, 计数: " << pre_obstacle_detect_count << "/" << PRE_OBSTACLE_DETECT_THRESHOLD << endl;
+                        } else {
+                            if (pre_obstacle_detect_count > 0) {
+                               cout << "[避障预警] 潜在障碍丢失, 重置计数" << endl;
+                            }
+                            pre_obstacle_detect_count = 0;
+                        }
 
-                    if (!result.empty()) {
-                        // 查找蓝色障碍物（label=0，且在有效高度范围内）
-                        for (const auto& box : result) {
-                            int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
-                            if (box.label == 0 && box.prob > 0.6f &&
-                                box_y2 < BZ_Y_UPPER_THRESHOLD && box_y2 > BZ_Y_LOWER_THRESHOLD) {
-                                obstacle_found_this_frame = true;
-                                blue_box = box;
-                                break;
+                        if (pre_obstacle_detect_count >= PRE_OBSTACLE_DETECT_THRESHOLD) {
+                            cout << "[流程] 确认预警, 降速并激活精确检测" << endl;
+                            obstacle_detection_active = true;
+                        }
+                    }
+                    else
+                    {
+                        // 阶段二：精确检测
+                        result = fastestdet_obs->detect(frame);
+                        bool obstacle_found_this_frame = false;
+                        DetectObject blue_box;
+
+                        if (!result.empty()) {
+                            // 查找蓝色障碍物（label=0，且在有效高度范围内）
+                            for (const auto& box : result) {
+                                int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
+                                if (box.label == 0 && box.prob > 0.6f &&
+                                    box_y2 < BZ_Y_UPPER_THRESHOLD && box_y2 > BZ_Y_LOWER_THRESHOLD) {
+                                    obstacle_found_this_frame = true;
+                                    blue_box = box;
+                                    break;
+                                }
                             }
                         }
-                    }
 
-                    if (obstacle_found_this_frame) {
-                        // 检测到障碍物，累加计数
-                        bz_detect_count++;
-                        cout << "[避障检测] 发现蓝色障碍物，计数: " << bz_detect_count << "/" << BZ_DETECT_THRESHOLD << endl;
-                    } else {
-                        // 未检测到障碍物，重置计数
-                        if (bz_detect_count > 0) cout << "[避障检测] 障碍物消失，重置计数" << endl;
-                        bz_detect_count = 0;
-                    }
-
-                    // 连续检测到足够帧数，确认障碍物并进入避障模式
-                    if (bz_detect_count >= BZ_DETECT_THRESHOLD) {
-                        cout << "[流程] 确认蓝色障碍物，进入避障模式" << endl;
-                        setCarState(CarState::Avoidance);
-                        
-                        // 初始化避障相关参数
-                        int box_y2 = static_cast<int>(blue_box.rect.y + blue_box.rect.height);
-                        int box_x1 = static_cast<int>(blue_box.rect.x);
-                        int box_x2 = static_cast<int>(blue_box.rect.x + blue_box.rect.width);
-                        int box_y1 = static_cast<int>(blue_box.rect.y);
-                        last_known_bz_xcenter = (box_x1 + box_x2) / 2;
-                        last_known_bz_x1 = box_x1;
-                        last_known_bz_x2 = box_x2;
-                        last_known_bz_bottom = box_y2;
-                        last_known_bz_heighest = box_y1;
-                        bz_heighest = last_known_bz_heighest;
-
-                        // 执行第一次补线操作
-                        // 根据避障策略决定补线方向
-                        bool avoid_left;
-                        switch (AVOIDANCE_STRATEGY) {
-                            case AvoidanceDirection::ForceLeft:
-                                avoid_left = true;
-                                break;
-                            case AvoidanceDirection::ForceRight:
-                                avoid_left = false;
-                                break;
-                            case AvoidanceDirection::Auto:
-                            default:
-                                // 自动模式：基于障碍物位置判断
-                                avoid_left = (last_known_bz_xcenter > 160); 
-                                break;
-                        }
-
-                        // 执行补线
-                        if (avoid_left) {
-                            // 向左避障: 在障碍物左侧补线，引导车辆向左
-                            bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x1, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
+                        if (obstacle_found_this_frame) {
+                            // 检测到障碍物，累加计数
+                            bz_detect_count++;
+                            cout << "[避障检测] 发现蓝色障碍物，计数: " << bz_detect_count << "/" << BZ_DETECT_THRESHOLD << endl;
                         } else {
-                            // 向右避障: 在障碍物右侧补线，引导车辆向右
-                            bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x2, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
+                            // 未检测到障碍物，重置计数
+                            if (bz_detect_count > 0) cout << "[避障检测] 障碍物消失，重置计数" << endl;
+                            bz_detect_count = 0;
                         }
-                        Tracking_bz(bin_image); 
-                        bz_detect_count = 0; // 重置计数器，避免重复进入
+
+                        // 连续检测到足够帧数，确认障碍物并进入避障模式
+                        if (bz_detect_count >= BZ_DETECT_THRESHOLD) {
+                            cout << "[流程] 确认蓝色障碍物，进入避障模式" << endl;
+                            setCarState(CarState::Avoidance);
+                            
+                            // 初始化避障相关参数
+                            int box_y2 = static_cast<int>(blue_box.rect.y + blue_box.rect.height);
+                            int box_x1 = static_cast<int>(blue_box.rect.x);
+                            int box_x2 = static_cast<int>(blue_box.rect.x + blue_box.rect.width);
+                            int box_y1 = static_cast<int>(blue_box.rect.y);
+                            last_known_bz_xcenter = (box_x1 + box_x2) / 2;
+                            last_known_bz_x1 = box_x1;
+                            last_known_bz_x2 = box_x2;
+                            last_known_bz_bottom = box_y2;
+                            last_known_bz_heighest = box_y1;
+                            bz_heighest = last_known_bz_heighest;
+
+                            // 执行第一次补线操作
+                            // 根据避障策略决定补线方向
+                            bool avoid_left;
+                            switch (AVOIDANCE_STRATEGY) {
+                                case AvoidanceDirection::ForceLeft:
+                                    avoid_left = true;
+                                    break;
+                                case AvoidanceDirection::ForceRight:
+                                    avoid_left = false;
+                                    break;
+                                case AvoidanceDirection::Auto:
+                                default:
+                                    // 自动模式：基于障碍物位置判断
+                                    avoid_left = (last_known_bz_xcenter > 160); 
+                                    break;
+                            }
+
+                            // 执行补线
+                            if (avoid_left) {
+                                // 向左避障: 在障碍物左侧补线，引导车辆向左
+                                bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x1, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
+                            } else {
+                                // 向右避障: 在障碍物右侧补线，引导车辆向右
+                                bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x2, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
+                            }
+                            Tracking_bz(bin_image); 
+                            bz_detect_count = 0; // 重置计数器，避免重复进入
+                        }
                     }
                 }
                 break;
@@ -1823,6 +1913,8 @@ int main(int argc, char* argv[])
                         cout << "[流程] 障碍物已安全绕过，退出避障模式" << endl;
                         count_bz++;
                         bz_disappear_count = 0;
+                        obstacle_detection_active = false; // 重置预警状态
+                        pre_obstacle_detect_count = 0;
                         setCarState(CarState::Cruise);
                     }
                 }
