@@ -764,10 +764,8 @@ bool Contour_Area(const vector<Point>& contour1, const vector<Point>& contour2)
 //      last_turn_signal - 之前的转向动作（0=左转/左道，1=右转/右道）
 // 返回: 是否成功计算出目标点
 bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target_x, int cone_outer_color, int last_turn_signal) {
-    // 如果锥桶数量小于等于2，视为无效检测
-    if (objects.size() <= 2) {
-        return false;
-    }
+    // 如果单侧锥桶数量小于等于2，则该侧无效
+
     // 分别收集blue和yellow锥桶
     std::vector<DetectObject> blue_cones;
     std::vector<DetectObject> yellow_cones;
@@ -795,8 +793,8 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
         std::sort(yellow_cones.begin(), yellow_cones.end(), compare_by_y2);
     }
 
-    bool has_blue = !blue_cones.empty();
-    bool has_yellow = !yellow_cones.empty();
+    bool has_blue = blue_cones.size() > 2;
+    bool has_yellow = yellow_cones.size() > 2;
 
     // 3. 根据锥桶分布情况计算目标点
     if (has_blue && has_yellow) {
