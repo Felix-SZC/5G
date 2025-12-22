@@ -114,154 +114,63 @@ int main(int argc, char** argv) {
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
-    // --- START: New lane filtering logic ---
-
-    // A. 初始化赛道宽度查找表 (逻辑从 main.cpp 移植)
-    std::vector<int> lane_widths;
-    lane_widths.assign(240, 0); // 对应 320x240 完整图像高度
-    const int y1 = 170, width1 = 320;
-    const int y2 = 130, width2 = 180;
-    double m = static_cast<double>(width1 - width2) / (y1 - y2);
-    double c = width1 - m * y1;
-    for (int y = 0; y < 240; ++y) {
-        int width = static_cast<int>(m * y + c);
-        if (width < 1) width = 1;
-        if (width > 320) width = 320;
-        lane_widths[y] = width;
-    }
-
-    // B. 连通域分析，找出所有候选线条
+    // 先进行连通域分析，过滤掉不符合面积要求的连通域
     Mat labels, stats, centroids;
     int numLabels = connectedComponentsWithStats(binaryMask, labels, stats, centroids, 8, CV_32S);
-
-    std::vector<int> candidate_labels;
-    Mat allCandidatesMask = Mat::zeros(binaryMask.size(), CV_8U);
+    Mat filteredByArea = Mat::zeros(binaryMask.size(), CV_8U);
     for (int i = 1; i < numLabels; ++i) {
         if (stats.at<int>(i, CC_STAT_AREA) >= MIN_COMPONENT_AREA) {
-            candidate_labels.push_back(i);
-            allCandidatesMask.setTo(255, labels == i);
+            filteredByArea.setTo(255, labels == i);
         }
     }
-
-    imshow("10a. All Candidates by Area", allCandidatesMask);
+    
+    imshow("10. Area Filtered ROI", filteredByArea);
     cout << "按任意键继续..." << endl;
     waitKey(0);
-
-    // C. 将候选线条分到左/右组
-    std::vector<int> left_candidates;
-    std::vector<int> right_candidates;
-    int image_center_x = binaryMask.cols / 2;
-    for (int label : candidate_labels) {
-        double centroid_x = centroids.at<double>(label, 0);
-        if (centroid_x < image_center_x) {
-            left_candidates.push_back(label);
-        } else {
-            right_candidates.push_back(label);
-        }
-    }
-
-    // D. 遍历所有左右组合，根据宽度模型评分，找出最佳组合
-    long best_error = -1;
-    int best_left_label = -1;
-    int best_right_label = -1;
-
-    for (int left_label : left_candidates) {
-        for (int right_label : right_candidates) {
-            long current_pair_error = 0;
-            int valid_rows = 0;
-
-            for (int y_roi = 0; y_roi < roiRect.height; ++y_roi) {
-                int y_frame = y_roi + roiRect.y;
-
-                int lx = -1; // 左线条在本行的最右侧 x 坐标
-                int rx = -1; // 右线条在本行的最左侧 x 坐标
-
-                for (int x = roiRect.width - 1; x >= 0; --x) {
-                    if (labels.at<int>(y_roi, x) == left_label) {
-                        lx = x;
-                        break;
-                    }
-                }
-
-                for (int x = 0; x < roiRect.width; ++x) {
-                    if (labels.at<int>(y_roi, x) == right_label) {
-                        rx = x;
-                        break;
-                    }
-                }
-
-                if (lx != -1 && rx != -1 && rx > lx) {
-                    int actual_width = rx - lx;
-                    if (y_frame >= 0 && y_frame < (int)lane_widths.size()) {
-                         int expected_width = lane_widths[y_frame];
-                         current_pair_error += std::abs(actual_width - expected_width);
-                         valid_rows++;
-                    }
-                }
-            }
-
-            if (valid_rows > 10) { // 要求至少有10行匹配才认为是有效组合
-                long average_error = current_pair_error / valid_rows;
-                if (best_error == -1 || average_error < best_error) {
-                    best_error = average_error;
-                    best_left_label = left_label;
-                    best_right_label = right_label;
-                }
-            }
-        }
-    }
-
-    // E. 生成只包含最佳组合的二值图
-    Mat filteredByLanes = Mat::zeros(binaryMask.size(), CV_8U);
-    if (best_left_label != -1 && best_right_label != -1) {
-        cout << "最佳组合: 左 " << best_left_label << ", 右 " << best_right_label << " (平均误差: " << best_error << ")" << endl;
-        filteredByLanes.setTo(255, labels == best_left_label);
-        filteredByLanes.setTo(255, labels == best_right_label);
-    } else {
-        cout << "警告: 未找到有效的车道线组合!" << endl;
-    }
-
-    imshow("10b. Best Pair Filtered", filteredByLanes);
-    cout << "按任意键继续..." << endl;
-    waitKey(0);
-
-    // --- END: New lane filtering logic ---
-
-    // 形态学操作 (在筛选出的最佳车道线上进行)
-    // 使用细而高的结构元素，只在竖直方向（y 方向）做闭运算，用来“接上”竖直方向断裂
+    
+    // 形态学操作 (在面积过滤后的结果上进行)
     static cv::Mat kernel_close = getStructuringElement(MORPH_RECT, Size(1, 9));
-    morphologyEx(filteredByLanes, filteredByLanes, MORPH_CLOSE, kernel_close);
-    // 不再做额外的膨胀，避免车道线明显变粗
+    morphologyEx(filteredByArea, filteredByArea, MORPH_CLOSE, kernel_close);
 
-    Mat filteredMorph = filteredByLanes;
+    Mat filteredMorph = filteredByArea;
 
     imshow("11. Morphed ROI", filteredMorph);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
-    // 将ROI内的结果图像复制回一个320x240的黑色背景图像，以匹配main.cpp中的输出格式
-    Mat finalImage = Mat::zeros(Size(320, 240), CV_8U);
-    filteredMorph.copyTo(finalImage(roiRect));
+    // Hough直线检测
+    vector<Vec4i> lines;
+    HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 8, 10, 12);
+    cout << "检测到 " << lines.size() << " 条直线" << endl;
 
-    // 在一个克隆的原图上绘制ROI矩形，用于对比
-    Mat resultOnOriginal = resizedFrame.clone();
-    rectangle(resultOnOriginal, roiRect, Scalar(0, 255, 0), 1);
-    
-    // 将二值图像转换为彩色，以便叠加显示
-    Mat binaryColor;
-    cvtColor(finalImage, binaryColor, COLOR_GRAY2BGR);
-    // 将白色区域标记为红色
-    binaryColor.setTo(Scalar(0, 0, 255), finalImage == 255);
-    
-    // 将处理结果（红色车道线）半透明叠加到原图上
-    addWeighted(resultOnOriginal, 1.0, binaryColor, 0.7, 0.0, resultOnOriginal);
+    // 在原图上绘制结果
+    Mat houghResult = resizedFrame.clone();
+    rectangle(houghResult, Rect(1, 109, 318, 46), Scalar(0, 255, 0), 1);
 
+    Mat finalImage = Mat::zeros(240, 320, CV_8U);
 
-    imshow("12. Final Result Overlay", resultOnOriginal);
+    for (const auto &l : lines) {
+        double angle = atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
+        double length = hypot(l[3] - l[1], l[2] - l[0]);
+
+        if (abs(angle) > 5 && length > 8) {
+            Vec4i adjustedLine = l;
+            adjustedLine[0] += roiRect.x; adjustedLine[1] += roiRect.y;
+            adjustedLine[2] += roiRect.x; adjustedLine[3] += roiRect.y;
+
+            line(finalImage, Point(adjustedLine[0], adjustedLine[1]),
+                 Point(adjustedLine[2], adjustedLine[3]), Scalar(255), 3, LINE_AA);
+
+            line(houghResult, Point(adjustedLine[0], adjustedLine[1]),
+                 Point(adjustedLine[2], adjustedLine[3]), Scalar(0, 0, 255), 2, LINE_AA);
+        }
+    }
+
+    imshow("12. Hough Lines", houghResult);
     cout << "按任意键继续..." << endl;
     waitKey(0);
 
-    imshow("13. Final Binary Image", finalImage);
+    imshow("13. Final Result", finalImage);
     cout << "按ESC退出" << endl;
     waitKey(0);
     
