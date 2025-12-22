@@ -1,6 +1,8 @@
 #include <iostream> // 标准输入输出流库
 #include <cstdlib> // 标准库
 
+#define DEBUG_CONE 1
+
 
 #include <opencv2/opencv.hpp> // OpenCV主头文件
 #include <opencv2/core/core.hpp> // OpenCV核心功能
@@ -149,7 +151,7 @@ const int MIN_COMPONENT_AREA = 400; // 连通区域最小面积阈值（用于�
 //---------------蓝色挡板发车相关----------------------------------------------
 int find_first = 0; // 标记是否第一次找到蓝色挡板
 int blue_detect_count = 0; // 蓝色挡板连续检测计数
-const int BLUE_DETECT_THRESHOLD = 5; // 需要连续检测到的帧数才能确认找到蓝色挡板
+const int BLUE_DETECT_THRESHOLD = 3; // 需要连续检测到的帧数才能确认找到蓝色挡板
 
 // HSV颜色范围
 const int BLUE_H_MIN = 100;  // 色调H最小值
@@ -236,8 +238,8 @@ int turn_signal_label = -1;                                        // 转向标�
 // ----------------锥桶引导相关---------------------------------------------------
 int cone_outer_color = 1; // 0=蓝色为外侧边界, 1=黄色为外侧边界
 const int CONE_ENTER_THRESHOLD = 5; // 确认锥桶出现的帧数阈值
-const int CONE_BOTTOM_Y_THRESHOLD = 140; // 进入锥桶引导的底部高度阈值
-const int CONE_EXIT_THRESHOLD = 3; // 确认锥桶消失的帧数阈值
+const int CONE_BOTTOM_Y_THRESHOLD = 130; // 进入锥桶引导的底部高度阈值
+const int CONE_EXIT_THRESHOLD = 5; // 确认锥桶消失的帧数阈值
 bool has_seen_cones = false; // 是否已确认进入锥桶引导模式
 int cones_detect_count = 0; // 锥桶连续检测计数
 int cones_lost_count = 0; // 锥桶连续丢失计数
@@ -778,6 +780,10 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
         }
     }
 
+#if DEBUG_CONE
+    printf("[CONE] Blue cones: %zu, Yellow cones: %zu\n", blue_cones.size(), yellow_cones.size());
+#endif
+
     // 辅助函数：按y2（底部y坐标）降序排序的比较函数
     auto compare_by_y2 = [](const DetectObject& a, const DetectObject& b) {
         float y2_a = a.rect.y + a.rect.height;
@@ -818,6 +824,9 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
         
         // 目标点取两侧中心位置的平均值，作为车道中心
         target_x = static_cast<int>((avg_blue + avg_yellow) / 2.0f);
+#if DEBUG_CONE
+        printf("[CONE] Case 1: Both. L_base:%.1f, R_base:%.1f, Target:%d\n", avg_yellow, avg_blue, target_x);
+#endif
         return true;
 
     } else if (has_blue) {
@@ -834,7 +843,7 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
         
         // 越界保护
         if (avg_blue_y < 0) avg_blue_y = 0;
-        if (avg_blue_y >= lane_widths.size()) avg_blue_y = lane_widths.size() - 1;
+        if (static_cast<size_t>(avg_blue_y) >= lane_widths.size()) avg_blue_y = static_cast<int>(lane_widths.size()) - 1;
         int dynamic_offset = lane_widths[avg_blue_y] / 2;
 
         // 判断蓝色锥桶在左侧还是右侧
@@ -848,6 +857,9 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
             // 蓝色在右侧：车道中心在蓝色左侧，目标点 = 蓝色位置 - 偏移量
             target_x = static_cast<int>(avg_blue_x) - dynamic_offset;
         }
+#if DEBUG_CONE
+        printf("[CONE] Case 2: Blue only. Avg_X:%.1f, Offset:%d, Target:%d\n", avg_blue_x, dynamic_offset, target_x);
+#endif
         
     } else if (has_yellow) {
         // --- 情况三: 只有黄色锥桶 ---
@@ -863,7 +875,7 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
 
         // 越界保护
         if (avg_yellow_y < 0) avg_yellow_y = 0;
-        if (avg_yellow_y >= lane_widths.size()) avg_yellow_y = lane_widths.size() - 1;
+        if (static_cast<size_t>(avg_yellow_y) >= lane_widths.size()) avg_yellow_y = static_cast<int>(lane_widths.size()) - 1;
         int dynamic_offset = lane_widths[avg_yellow_y] / 2;
 
         // 判断黄色锥桶在左侧还是右侧
@@ -877,6 +889,9 @@ bool calculate_cone_target(const std::vector<DetectObject>& objects, int& target
             // 黄色在右侧：车道中心在黄色左侧，目标点 = 黄色位置 - 偏移量
             target_x = static_cast<int>(avg_yellow_x) - dynamic_offset;
         }
+#if DEBUG_CONE
+        printf("[CONE] Case 3: Yellow only. Avg_X:%.1f, Offset:%d, Target:%d\n", avg_yellow_x, dynamic_offset, target_x);
+#endif
 
     } else {
         // --- 情况四: 未检测到任何锥桶 ---
@@ -1520,10 +1535,15 @@ void motor_servo_contral()
                 servo_pwm_now = servo_pd_cone(cone_target_x);
                 gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CONE_GUIDANCE);
             } else {
-                // 否则使用为锥桶引导优化的平缓巡线参数
-                servo_pwm_now = servo_pd_cone_cruise(160);
+                // 未检测到锥桶目标
+                if (has_seen_cones) {
+                    // 已进入引导模式但丢失目标，直走
+                    servo_pwm_now = servo_pwm_mid;
+                } else {
+                    // 尚未进入引导模式，使用后备巡线
+                    servo_pwm_now = servo_pd_cone_cruise(160);
+                }
                 gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CONE_CRUISE);
-
             }
             break;
 
@@ -1979,11 +1999,12 @@ int main(int argc, char* argv[])
                     bool entry_conditions_met = cone_found_this_frame && (max_cone_bottom_y >= CONE_BOTTOM_Y_THRESHOLD);
 
                     if (cone_found_this_frame) {
-                        cone_target_x = target_tmp;
-                        cones_lost_count = 0; // 重置丢失计数
+                        cones_lost_count = 0; // 只要找到锥桶，就重置丢失计数
+
                         if (!has_seen_cones) {
-                            if(entry_conditions_met) {
-                                cones_detect_count++; // 累加检测计数
+                            // [搜索模式]
+                            if (entry_conditions_met) {
+                                cones_detect_count++;
                                 cout << "[锥桶搜索] 发现有效锥桶 (高度满足)，计数: " << cones_detect_count << "/" << CONE_ENTER_THRESHOLD << " (y=" << (int)max_cone_bottom_y << ")" << endl;
                             } else {
                                 if (cones_detect_count > 0) {
@@ -1992,11 +2013,20 @@ int main(int argc, char* argv[])
                                 }
                             }
                         }
+
+                        // 根据最终条件决定是否使用锥桶坐标
+                        if (has_seen_cones && entry_conditions_met) {
+                            cone_target_x = target_tmp;
+                        } else {
+                            cone_target_x = -1; // 否则，即使找到锥桶也先用巡线
+                        }
+
                     } else {
-                        cone_target_x = -1; // 未检测到，使用后备巡线
+                        // 未检测到锥桶
+                        cone_target_x = -1; // 使用后备巡线
                         if (cones_detect_count > 0) {
-                             cout << "[锥桶搜索] 锥桶丢失，重置检测计数" << endl;
-                             cones_detect_count = 0; // 如果中断，则重置检测计数
+                            cout << "[锥桶搜索] 锥桶丢失，重置检测计数" << endl;
+                            cones_detect_count = 0; // 如果中断，则重置检测计数
                         }
                         if (has_seen_cones) {
                             cones_lost_count++; // 如果已在引导模式，累加丢失计数
