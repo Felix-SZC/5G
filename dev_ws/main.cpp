@@ -508,57 +508,22 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
 
     cv::Mat filteredMorph = filteredByArea;
 
-    std::vector<cv::Vec4i> lines;
-    cv::HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 8, 10, 12);
-
     cv::Mat finalImage = cv::Mat::zeros(targetSize, CV_8U);
-    cv::Mat overlayImage;
-    if (debugOverlay)
-    {
-        overlayImage = resizedFrame.clone();
-        cv::rectangle(overlayImage, roiRect, cv::Scalar(0, 255, 0), 1);
-    }
-
-    for (const auto &l : lines)
-    {
-        double angle = std::atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
-        double length = std::hypot(l[3] - l[1], l[2] - l[0]);
-
-        float angle_threshold = 5.0f;
-        if (state == CarState::Cruise || state == CarState::Avoidance)
-        {
-            angle_threshold = 15.0f;
-        }
-        else if (state == CarState::ConeGuidance && has_seen_cones)
-        {
-            angle_threshold = 60.0f;
-        }
-
-        if (std::abs(angle) > angle_threshold && length > 8)
-        {
-            cv::Vec4i adjustedLine = l;
-            adjustedLine[0] += roiRect.x;
-            adjustedLine[1] += roiRect.y;
-            adjustedLine[2] += roiRect.x;
-            adjustedLine[3] += roiRect.y;
-
-            cv::line(finalImage,
-                     cv::Point(adjustedLine[0], adjustedLine[1]),
-                     cv::Point(adjustedLine[2], adjustedLine[3]),
-                     cv::Scalar(255), 3, cv::LINE_AA);
-            if (debugOverlay)
-            {
-                cv::line(overlayImage,
-                         cv::Point(adjustedLine[0], adjustedLine[1]),
-                         cv::Point(adjustedLine[2], adjustedLine[3]),
-                         cv::Scalar(0, 0, 255), 2, cv::LINE_AA);
-            }
-        }
-    }
+    filteredMorph.copyTo(finalImage(roiRect));
 
     if (debugOverlay)
     {
-        *debugOverlay = overlayImage;
+        *debugOverlay = resizedFrame.clone();
+        cv::rectangle(*debugOverlay, roiRect, cv::Scalar(0, 255, 0), 1);
+        
+        cv::Mat binaryColor;
+        cv::cvtColor(finalImage, binaryColor, cv::COLOR_GRAY2BGR);
+        
+        // 将二值图像中的白色区域（车道线）设置为红色
+        binaryColor.setTo(cv::Scalar(0, 0, 255), finalImage == 255);
+        
+        // 将处理后的二值图像叠加到调试图像上
+        cv::addWeighted(*debugOverlay, 1.0, binaryColor, 0.7, 0, *debugOverlay);
     }
 
     return finalImage;
