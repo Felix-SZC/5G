@@ -33,7 +33,7 @@ const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，�
 
 //---------------性能统计---------------------------------------------------
 int number = 0; // 已处理帧计数
-bool SHOW_FPS = false; // 是否显示FPS信息，可通过命令行参数控制
+bool SHOW_FPS = true; // 是否显示FPS信息，可通过命令行参数控制
 
 //------------速度参数配置------------------------------------------------------------------------------------------
 const int MOTOR_SPEED_DELTA_CRUISE = 1300;           // 常规巡航速度增量
@@ -146,7 +146,8 @@ Mat bin_image; // 存储二值化图像--Sobel检测后图像
 std::chrono::steady_clock::time_point last_save_time; // 上次保存图像的时间
 const int SAVE_INTERVAL_SECONDS = 30; // 保存间隔（秒）
 const std::string SAVE_DIR = "captured_images"; // 保存目录
-const int MIN_COMPONENT_AREA = 400; // 连通区域最小面积阈值（用于过滤噪声）
+// MIN_COMPONENT_AREA已改为动态阈值，根据是否找到斑马线在ImageSobel函数内动态设置（找到前100，找到后400）
+// const int MIN_COMPONENT_AREA = 400; // 旧版本：连通区域最小面积阈值（用于过滤噪声）
 
 //---------------蓝色挡板发车相关----------------------------------------------
 int find_first = 0; // 标记是否第一次找到蓝色挡板
@@ -434,6 +435,17 @@ cv::Mat drawWhiteLine(cv::Mat binaryImage, cv::Point start, cv::Point end, int l
 // 功能: 提取巡线二值图（Sobel+亮度自适应+形态学），可选输出调试覆盖图
 cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullptr) 
 {
+    int min_area_threshold;
+    if (state == CarState::ZebraStop || state == CarState::PostZebra || 
+        state == CarState::LaneChange || state == CarState::ConeGuidance ||
+        state == CarState::ParkingApproachDetection || state == CarState::ParkingSearch ||
+        state == CarState::BriefStopForABActivation || state == CarState::BriefStopForParking ||
+        state == CarState::PreParking || state == CarState::ParkingComplete) {
+        min_area_threshold = 400; // 找到斑马线后
+    } else {
+        min_area_threshold = 100; // 找到斑马线前
+    }
+
     const cv::Size targetSize(320, 240);
     cv::Mat resizedFrame;
     if (frame.size() != targetSize)
@@ -494,22 +506,20 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
     cv::Mat filteredByArea = cv::Mat::zeros(binaryMask.size(), CV_8U);
     for (int i = 1; i < numLabels; ++i)
     {
-        if (stats.at<int>(i, cv::CC_STAT_AREA) >= MIN_COMPONENT_AREA)
+        if (stats.at<int>(i, cv::CC_STAT_AREA) >= min_area_threshold)
         {
             filteredByArea.setTo(255, labels == i);
         }
     }
 
     // 在面积过滤后的结果上执行形态学操作，避免binaryMask.clone()的开销
-    static cv::Mat kernel_close = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(13, 9)); // 闭运算连接断裂
+    static cv::Mat kernel_close = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 9)); // 闭运算连接断裂
     cv::morphologyEx(filteredByArea, filteredByArea, cv::MORPH_CLOSE, kernel_close);
-    static cv::Mat kernel_dilate = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7)); // 膨胀加粗车道线
-    cv::dilate(filteredByArea, filteredByArea, kernel_dilate, cv::Point(-1, -1), 1);
-
     cv::Mat filteredMorph = filteredByArea;
 
     std::vector<cv::Vec4i> lines;
-    cv::HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 8, 10, 12);
+    // 使用优化后的参数：threshold=15, minLineLength=40, maxLineGap=25
+    cv::HoughLinesP(filteredMorph, lines, 1, CV_PI / 180, 15, 40, 25);
 
     cv::Mat finalImage = cv::Mat::zeros(targetSize, CV_8U);
     cv::Mat overlayImage;
@@ -519,6 +529,8 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
         cv::rectangle(overlayImage, roiRect, cv::Scalar(0, 255, 0), 1);
     }
 
+    // 1. 基础筛选与分类
+    std::vector<cv::Vec4i> leftLines, rightLines;
     for (const auto &l : lines)
     {
         double angle = std::atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
@@ -534,25 +546,140 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
             angle_threshold = 60.0f;
         }
 
+        // 保留原有的角度和长度基础筛选
         if (std::abs(angle) > angle_threshold && length > 8)
         {
-            cv::Vec4i adjustedLine = l;
-            adjustedLine[0] += roiRect.x;
-            adjustedLine[1] += roiRect.y;
-            adjustedLine[2] += roiRect.x;
-            adjustedLine[3] += roiRect.y;
+            // 计算斜率进行分类
+            double dx = l[2] - l[0];
+            double dy = l[3] - l[1];
+            if (std::abs(dx) < 1e-6) continue; // 忽略垂直线
 
-            cv::line(finalImage,
-                     cv::Point(adjustedLine[0], adjustedLine[1]),
-                     cv::Point(adjustedLine[2], adjustedLine[3]),
-                     cv::Scalar(255), 3, cv::LINE_AA);
-            if (debugOverlay)
-            {
-                cv::line(overlayImage,
-                         cv::Point(adjustedLine[0], adjustedLine[1]),
-                         cv::Point(adjustedLine[2], adjustedLine[3]),
-                         cv::Scalar(0, 0, 255), 2, cv::LINE_AA);
+            double slope = dy / dx;
+            // 左边线大概长"/" (slope < 0), 右边线长"\" (slope > 0)
+            // 注意OpenCV图像坐标系Y轴向下
+            if (slope < 0) {
+                leftLines.push_back(l);
+            } else {
+                rightLines.push_back(l);
             }
+        }
+    }
+
+    // 2. 动态容忍度双重筛选
+    cv::Vec4i bestLeft = {0, 0, 0, 0}, bestRight = {0, 0, 0, 0};
+    bool foundPair = false;
+    double minError = 1e9;
+    
+    // ROI在全局图像中的Y偏移 (根据代码: const cv::Rect roiRect(1, 109, 318, 46);)
+    int roi_y_offset = 109;
+    // 我们在ROI的中间位置计算宽度进行校验
+    int check_y_local = 23; 
+    int check_y_global = roi_y_offset + check_y_local;
+    int ideal_width = 0;
+    
+    if (check_y_global >= 0 && static_cast<size_t>(check_y_global) < lane_widths.size()) {
+        ideal_width = lane_widths[check_y_global];
+    }
+
+    // --- 第一轮: 寻找最小宽度误差 ---
+    if (ideal_width > 0) {
+        for (const auto& l_left : leftLines) {
+            for (const auto& l_right : rightLines) {
+                double k_left = (double)(l_left[3] - l_left[1]) / (l_left[2] - l_left[0]);
+                double x_left = l_left[0] + (check_y_local - l_left[1]) / k_left;
+                double k_right = (double)(l_right[3] - l_right[1]) / (l_right[2] - l_right[0]);
+                double x_right = l_right[0] + (check_y_local - l_right[1]) / k_right;
+                double width_calc = x_right - x_left;
+                
+                if (width_calc > 0) {
+                    minError = std::min(minError, std::abs(width_calc - ideal_width));
+                }
+            }
+        }
+    }
+
+    // --- 第二轮: 在动态容忍度范围内寻找最长线对 ---
+    if (ideal_width > 0 && minError < 1e9) {
+        const double dynamic_tolerance = minError + 10.0; // 动态容忍度
+        double maxTotalLength = 0;
+
+        for (const auto& l_left : leftLines) {
+            for (const auto& l_right : rightLines) {
+                double k_left = (double)(l_left[3] - l_left[1]) / (l_left[2] - l_left[0]);
+                double x_left = l_left[0] + (check_y_local - l_left[1]) / k_left;
+                double k_right = (double)(l_right[3] - l_right[1]) / (l_right[2] - l_right[0]);
+                double x_right = l_right[0] + (check_y_local - l_right[1]) / k_right;
+                double width_calc = x_right - x_left;
+
+                if (width_calc > 0) {
+                    double error = std::abs(width_calc - ideal_width);
+                    if (error <= dynamic_tolerance) {
+                        double len_left = std::hypot(l_left[2] - l_left[0], l_left[3] - l_left[1]);
+                        double len_right = std::hypot(l_right[2] - l_right[0], l_right[3] - l_right[1]);
+                        double totalLength = len_left + len_right;
+
+                        if (totalLength > maxTotalLength) {
+                            maxTotalLength = totalLength;
+                            bestLeft = l_left;
+                            bestRight = l_right;
+                            foundPair = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. 绘制结果
+    if (foundPair)
+    {
+        // 绘制筛选出的最佳左线
+        cv::Vec4i adjustedLeft = bestLeft;
+        adjustedLeft[0] += roiRect.x; adjustedLeft[1] += roiRect.y;
+        adjustedLeft[2] += roiRect.x; adjustedLeft[3] += roiRect.y;
+        cv::line(finalImage,
+                 cv::Point(adjustedLeft[0], adjustedLeft[1]),
+                 cv::Point(adjustedLeft[2], adjustedLeft[3]),
+                 cv::Scalar(255), 3, cv::LINE_AA);
+
+        // 绘制筛选出的最佳右线
+        cv::Vec4i adjustedRight = bestRight;
+        adjustedRight[0] += roiRect.x; adjustedRight[1] += roiRect.y;
+        adjustedRight[2] += roiRect.x; adjustedRight[3] += roiRect.y;
+        cv::line(finalImage,
+                 cv::Point(adjustedRight[0], adjustedRight[1]),
+                 cv::Point(adjustedRight[2], adjustedRight[3]),
+                 cv::Scalar(255), 3, cv::LINE_AA);
+
+        if (debugOverlay)
+        {
+            // 调试模式下用黄色绘制最佳线对
+            cv::line(overlayImage,
+                     cv::Point(adjustedLeft[0], adjustedLeft[1]),
+                     cv::Point(adjustedLeft[2], adjustedLeft[3]),
+                     cv::Scalar(0, 255, 255), 2, cv::LINE_AA);
+            cv::line(overlayImage,
+                     cv::Point(adjustedRight[0], adjustedRight[1]),
+                     cv::Point(adjustedRight[2], adjustedRight[3]),
+                     cv::Scalar(0, 255, 255), 2, cv::LINE_AA);
+        }
+    }
+    else
+    {
+        // 未找到匹配线对，回退到绘制所有通过基础筛选的线（保持原有行为，但分为左右颜色方便调试）
+        for (const auto& l : leftLines) {
+            cv::Vec4i adjustedLine = l;
+            adjustedLine[0] += roiRect.x; adjustedLine[1] += roiRect.y;
+            adjustedLine[2] += roiRect.x; adjustedLine[3] += roiRect.y;
+            cv::line(finalImage, cv::Point(adjustedLine[0], adjustedLine[1]), cv::Point(adjustedLine[2], adjustedLine[3]), cv::Scalar(255), 3, cv::LINE_AA);
+            if (debugOverlay) cv::line(overlayImage, cv::Point(adjustedLine[0], adjustedLine[1]), cv::Point(adjustedLine[2], adjustedLine[3]), cv::Scalar(255, 0, 0), 2, cv::LINE_AA); // 蓝色
+        }
+        for (const auto& l : rightLines) {
+            cv::Vec4i adjustedLine = l;
+            adjustedLine[0] += roiRect.x; adjustedLine[1] += roiRect.y;
+            adjustedLine[2] += roiRect.x; adjustedLine[3] += roiRect.y;
+            cv::line(finalImage, cv::Point(adjustedLine[0], adjustedLine[1]), cv::Point(adjustedLine[2], adjustedLine[3]), cv::Scalar(255), 3, cv::LINE_AA);
+            if (debugOverlay) cv::line(overlayImage, cv::Point(adjustedLine[0], adjustedLine[1]), cv::Point(adjustedLine[2], adjustedLine[3]), cv::Scalar(0, 0, 255), 2, cv::LINE_AA); // 红色
         }
     }
 
