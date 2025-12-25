@@ -44,7 +44,7 @@ const int MOTOR_SPEED_DELTA_CONE_GUIDANCE = 1100;    // 锥桶引导阶段速度
 const int MOTOR_SPEED_DELTA_CONE_CRUISE = 1300;      // 锥桶引导后备巡线速度增量（无锥桶目标时）
 const int MOTOR_SPEED_DELTA_PARKING_SEARCH = 1300;   // 寻找车库速度增量（未激活A/B识别时）
 const int MOTOR_SPEED_DELTA_PARKING_FOLLOW = 1100;   // 车库跟随速度增量（已激活A/B识别时）
-const int MOTOR_SPEED_DELTA_PRE_PARKING = 1100;      // 预入库阶段速度增量
+const int MOTOR_SPEED_DELTA_PRE_PARKING = 1000;      // 预入库阶段速度增量
 const int MOTOR_SPEED_DELTA_BRAKE = -3000;           // 瞬时反转/刹停增量
 
 //------------时间参数配置（单位：秒）------------------------------------------------------------------------------------------
@@ -54,9 +54,13 @@ const float START_DELAY_SECONDS = 2.0f;              // 发车延时时间（秒
 const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时间（秒）
 const float POST_ZEBRA_DELAY_SECONDS = 1.0f;        // 斑马线后巡线延迟时间（秒）
 const float FAST_CRUISE_DURATION_SECONDS = 5.0f;    // 避障前高速巡航持续时间（秒）
+const float POST_AVOIDANCE_FAST_CRUISE_DURATION_SECONDS = 3.0f; // 避障后高速巡航持续时间
+
+
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
 const float LANE_CHANGE_DURATION_SECONDS = 1.5f;    // 变道持续时间（秒）
-const float POST_CONE_CRUISE_DURATION_SECONDS = 3.0f; // 锥桶引导后巡线延迟时间（秒）
+const float POST_CONE_CRUISE_LOW_DURATION_SECONDS = 2.0f;  // 锥桶引导后低速巡航时间
+const float POST_CONE_CRUISE_HIGH_DURATION_SECONDS = 3.0f; // 锥桶引导后高速巡航时间
 const int SERVO_PWM_LEFT_TURN = 780;                // 左转PWM值
 const int SERVO_PWM_RIGHT_TURN = 690;               // 右转PWM值
 const int MOTOR_SPEED_DELTA_LANE_CHANGE = 1300;     // 变道速度增量
@@ -73,10 +77,13 @@ enum class CarState {
     Brake_After_High_Cruise, // 高速巡航后的刹车
     Cruise_Low,     // 低速巡航（原Cruise）
     Avoidance,      // 避障
+    Cruise_High_Post_Avoidance, // 避障后的高速巡航
     ZebraStop,      // 在斑马线处等待
     PostZebra,      // 斑马线后恢复
     LaneChange,     // 变道
     ConeGuidance,   // 引导锥桶区域
+    PostConeCruise_Low,         // 锥桶引导后的低速巡航
+    PostConeCruise_High,        // 锥桶引导后的高速巡航
     ParkingApproachDetection,  // 蓝框（蓝点）识别
     ParkingSearch,  // AB识别和计数
     BriefStopForABActivation,  // 激活AB识别前的停车
@@ -96,10 +103,13 @@ std::string carStateToString(CarState state) {
         case CarState::Brake_After_High_Cruise: return "Brake_After_High_Cruise (巡航后刹车)";
         case CarState::Cruise_Low:     return "Cruise_Low (低速巡航)";
         case CarState::Avoidance:      return "Avoidance (避障)";
+        case CarState::Cruise_High_Post_Avoidance: return "Cruise_High_Post_Avoidance (避障后高速巡航)";
         case CarState::ZebraStop:      return "ZebraStop (在斑马线处等待)";
         case CarState::PostZebra:      return "PostZebra (斑马线后恢复)";
         case CarState::LaneChange:     return "LaneChange (变道)";
         case CarState::ConeGuidance:    return "ConeGuidance (引导锥桶区域)";
+        case CarState::PostConeCruise_Low: return "PostConeCruise_Low (锥桶引导后的低速巡航)";
+        case CarState::PostConeCruise_High: return "PostConeCruise_High (锥桶引导后的高速巡航)";
         case CarState::ParkingApproachDetection: return "ParkingApproachDetection (蓝框识别)";
         case CarState::ParkingSearch:  return "ParkingSearch (AB识别)";
         case CarState::BriefStopForABActivation: return "BriefStopForABActivation (激活AB识别前停车)";
@@ -446,6 +456,7 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
     if (state == CarState::ZebraStop || state == CarState::PostZebra || 
         state == CarState::LaneChange || state == CarState::ConeGuidance ||
         state == CarState::ParkingApproachDetection || state == CarState::ParkingSearch ||
+        state == CarState::PostConeCruise_Low || state == CarState::PostConeCruise_High ||
         state == CarState::BriefStopForABActivation || state == CarState::BriefStopForParking ||
         state == CarState::PreParking || state == CarState::ParkingComplete) {
         min_area_threshold = 400; // 找到斑马线后
@@ -544,7 +555,7 @@ cv::Mat ImageSobel(cv::Mat &frame, CarState state, cv::Mat *debugOverlay = nullp
         double length = std::hypot(l[3] - l[1], l[2] - l[0]);
 
         float angle_threshold = 5.0f;
-        if (state == CarState::Cruise_High || state == CarState::Cruise_Low || state == CarState::Avoidance)
+        if (state == CarState::Cruise_High || state == CarState::Cruise_Low || state == CarState::Avoidance || state == CarState::Cruise_High_Post_Avoidance || state == CarState::PostConeCruise_Low || state == CarState::PostConeCruise_High)
         {
             angle_threshold = 15.0f;
         }
@@ -1650,6 +1661,11 @@ void motor_servo_contral()
             gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_AVOID); // 避障时使用较慢速度
             break;
 
+        case CarState::Cruise_High_Post_Avoidance:
+            servo_pwm_now = servo_pd(160);
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE_FAST); // 设置为高速
+            break;
+
         case CarState::LaneChange:
             // 状态：盲跑变道
             if (turn_signal_label == 0) { // Left
@@ -1679,6 +1695,16 @@ void motor_servo_contral()
                 }
                 gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CONE_CRUISE);
             }
+            break;
+
+        case CarState::PostConeCruise_Low:
+            servo_pwm_now = servo_pd(160);
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE_SLOW);
+            break;
+            
+        case CarState::PostConeCruise_High:
+            servo_pwm_now = servo_pd(160);
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE_FAST);
             break;
 
         case CarState::Cruise_High:
@@ -2069,10 +2095,23 @@ int main(int argc, char* argv[])
 
                     // 检查是否满足退出避障的条件
                     if (bz_disappear_count >= BZ_DISAPPEAR_THRESHOLD) {
-                        cout << "[流程] 障碍物已安全绕过，退出避障模式" << endl;
+                        cout << "[流程] 障碍物已安全绕过，进入避障后高速巡航" << endl;
                         count_bz++;
                         bz_disappear_count = 0;
+                        setCarState(CarState::Cruise_High_Post_Avoidance); // 切换到新状态
+                        state_transition_time = std::chrono::steady_clock::now(); // 启动计时器
+                    }
+                }
+                break;
+
+            case CarState::Cruise_High_Post_Avoidance:
+                Tracking(bin_image);
+                {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed_sec = std::chrono::duration_cast<std::chrono::microseconds>(now - state_transition_time).count() / 1000000.0;
+                    if (elapsed_sec >= POST_AVOIDANCE_FAST_CRUISE_DURATION_SECONDS) {
                         setCarState(CarState::Cruise_Low);
+                        std::cout << "[流程] 避障后高速巡航结束，切换到低速巡航并开始寻找斑马线" << std::endl;
                     }
                 }
                 break;
@@ -2223,12 +2262,36 @@ int main(int argc, char* argv[])
                 }
                 
                 if (has_seen_cones && cones_lost_count >= CONE_EXIT_THRESHOLD) {
-                    cout << "[流程] 通过锥桶区域，开始" << static_cast<int>(POST_CONE_CRUISE_DURATION_SECONDS) << "秒巡线延迟..." << endl;
-                    parking_approach_detect_count = 0;
-                    post_cone_cruise_start_time = std::chrono::steady_clock::now(); // 启动锥桶引导后巡线延迟计时器
-                    need_post_cone_cruise_delay = true; // 设置延迟标志
-                    from_cone_guidance = true; // 标记来自锥桶引导
-                    setCarState(CarState::ParkingApproachDetection);
+                    cout << "[流程] 通过锥桶引导区域，进入锥桶引导后的低速巡航..." << endl;
+                    setCarState(CarState::PostConeCruise_Low);
+                    state_transition_time = std::chrono::steady_clock::now();
+                }
+                break;
+
+            case CarState::PostConeCruise_Low:
+                Tracking(bin_image);
+                {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed_sec = std::chrono::duration_cast<std::chrono::microseconds>(now - state_transition_time).count() / 1000000.0;
+                    if (elapsed_sec >= POST_CONE_CRUISE_LOW_DURATION_SECONDS) {
+                        setCarState(CarState::PostConeCruise_High);
+                        state_transition_time = std::chrono::steady_clock::now();
+                        std::cout << "[流程] 锥桶引导后的低速巡航结束，切换到高速巡航" << std::endl;
+                    }
+                }
+                break;
+
+            case CarState::PostConeCruise_High:
+                Tracking(bin_image);
+                {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed_sec = std::chrono::duration_cast<std::chrono::microseconds>(now - state_transition_time).count() / 1000000.0;
+                    if (elapsed_sec >= POST_CONE_CRUISE_HIGH_DURATION_SECONDS) {
+                        setCarState(CarState::ParkingApproachDetection);
+                        parking_approach_detect_count = 0;
+                        from_cone_guidance = true; 
+                        std::cout << "[流程] 锥桶引导后的高速巡航结束，开始蓝框识别" << std::endl;
+                    }
                 }
                 break;
 
@@ -2236,18 +2299,8 @@ int main(int argc, char* argv[])
                 // 蓝框（蓝点）识别状态
                 Tracking(bin_image);
 
-                // 检查是否在锥桶引导后的巡线延迟时间内
-                if (need_post_cone_cruise_delay) {
-                    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - post_cone_cruise_start_time).count() / 1000000.0;
-                    if (elapsed < POST_CONE_CRUISE_DURATION_SECONDS) {
-                        // 在延迟时间内，只执行巡线，不进行任何检测
-                        break; // 直接退出，不执行后续检测逻辑
-                    } else {
-                        // 延迟时间结束，开启蓝框检测
-                        cout << "[流程] " << static_cast<int>(POST_CONE_CRUISE_DURATION_SECONDS) << "秒巡线延迟结束，开始蓝框检测..." << endl;
-                        need_post_cone_cruise_delay = false; // 清除延迟标志，继续执行后续蓝框检测逻辑
-                    }
-                }
+                // 从锥桶引导流程过来时，不再使用旧的need_post_cone_cruise_delay计时器逻辑
+                // 而是直接开始检测
 
                 // 检测蓝点（蓝框）
                 if (detect_parking_approach_points(frame)) {
