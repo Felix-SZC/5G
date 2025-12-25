@@ -141,7 +141,12 @@ add_executable(SmartCarBackup
     ${FASTESTDET_SOURCES}
 )
 
-foreach(target_name IN ITEMS SmartCar SmartCarBackup)
+add_executable(SmartCarFast
+    ${CMAKE_SOURCE_DIR}/main_fast.cpp
+    ${FASTESTDET_SOURCES}
+)
+
+foreach(target_name IN ITEMS SmartCar SmartCarBackup SmartCarFast)
     target_link_libraries(${target_name}
         ${PIGPIO_LIBRARY}
         ncnn
@@ -155,10 +160,12 @@ endforeach()
 if(OpenMP_CXX_FOUND)
     target_link_libraries(SmartCar OpenMP::OpenMP_CXX)
     target_link_libraries(SmartCarBackup OpenMP::OpenMP_CXX)
+    target_link_libraries(SmartCarFast OpenMP::OpenMP_CXX)
 else()
     # 手动链接 OpenMP 库
     target_link_libraries(SmartCar gomp)
     target_link_libraries(SmartCarBackup gomp)
+    target_link_libraries(SmartCarFast gomp)
 endif()
 
 # 设置输出位置为构建目录
@@ -169,10 +176,15 @@ set_target_properties(SmartCarBackup PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
 )
 
+set_target_properties(SmartCarFast PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
+)
+
 message(STATUS "==============================================")
 message(STATUS "Main executables will be built to: ${PROJECT_SOURCE_DIR}/")
 message(STATUS "  - SmartCar (from main.cpp)")
 message(STATUS "  - SmartCarBackup (from main_backup.cpp)")
+message(STATUS "  - SmartCarFast (from main_fast.cpp)")
 message(STATUS "==============================================")
 
 # ============================================================
@@ -204,14 +216,31 @@ set_target_properties(test_banma PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# test_cruise_high: 高速巡线测试程序
+add_executable(test_cruise_high
+    ${CMAKE_SOURCE_DIR}/test_cruise_high.cpp
+)
+
+target_link_libraries(test_cruise_high
+    ${PIGPIO_LIBRARY}
+    ${OpenCV_LIBS}
+    ${CMAKE_THREAD_LIBS_INIT}
+    pthread
+)
+
+set_target_properties(test_cruise_high PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 message(STATUS "Test programs will be built to: ${CMAKE_BINARY_DIR}/")
 message(STATUS "  - test_sobel: ImageSobel function demo")
 message(STATUS "  - test_banma: banma_get function demo")
+message(STATUS "  - test_cruise_high: 高速巡线测试程序")
 
 # ============================================================
 # 安装规则（可选）
 # ============================================================
-install(TARGETS SmartCar SmartCarBackup
+install(TARGETS SmartCar SmartCarBackup SmartCarFast
     RUNTIME DESTINATION bin
 )
 
