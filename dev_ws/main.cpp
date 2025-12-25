@@ -54,6 +54,7 @@ const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时
 const float POST_ZEBRA_DELAY_SECONDS = 1.0f;        // 斑马线后巡线延迟时间（秒）
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
 const float LANE_CHANGE_DURATION_SECONDS = 1.5f;    // 变道持续时间（秒）
+float POST_CONE_STRAIGHT_DURATION_SECONDS = 0.3f; // 锥桶引导后直走延迟时间（秒，可通过命令行参数配置） 暂定0.3秒
 const float POST_CONE_CRUISE_DURATION_SECONDS = 3.0f; // 锥桶引导后巡线延迟时间（秒）
 const int SERVO_PWM_LEFT_TURN = 780;                // 左转PWM值
 const int SERVO_PWM_RIGHT_TURN = 690;               // 右转PWM值
@@ -245,6 +246,8 @@ bool has_seen_cones = false; // 是否已确认进入锥桶引导模式
 int cones_detect_count = 0; // 锥桶连续检测计数
 int cones_lost_count = 0; // 锥桶连续丢失计数
 int cone_target_x = -1; // 锥桶引导目标点X坐标（-1表示未检测到）
+bool need_post_cone_straight_delay = false; // 是否需要锥桶引导后直走延迟
+std::chrono::steady_clock::time_point post_cone_straight_start_time; // 直走延迟开始时间
 bool need_post_cone_cruise_delay = false; // 是否需要锥桶引导后巡线延迟
 bool from_cone_guidance = false; // 是否从锥桶引导来的（用于区分处理逻辑）
 std::vector<int> lane_widths; // 存储不同高度对应的赛道宽度
@@ -1620,8 +1623,14 @@ void motor_servo_contral()
             break;
 
         case CarState::ParkingApproachDetection:
-            // 状态：蓝框识别，使用寻找车库速度
-            servo_pwm_now = servo_pd_parking_cruise(160);
+            // 状态：蓝框识别
+            if (need_post_cone_straight_delay) {
+                // 直走延迟期间，舵机保持中值（直走）
+                servo_pwm_now = servo_pwm_mid;
+            } else {
+                // 直走延迟结束后，使用巡线控制
+                servo_pwm_now = servo_pd_parking_cruise(160);
+            }
             gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARKING_SEARCH);
             break;
 
@@ -2169,10 +2178,11 @@ int main(int argc, char* argv[])
                 }
                 
                 if (has_seen_cones && cones_lost_count >= CONE_EXIT_THRESHOLD) {
-                    cout << "[流程] 通过锥桶区域，开始" << static_cast<int>(POST_CONE_CRUISE_DURATION_SECONDS) << "秒巡线延迟..." << endl;
+                    cout << "[流程] 通过锥桶区域，先直走" << static_cast<int>(POST_CONE_STRAIGHT_DURATION_SECONDS * 10) / 10.0f << "秒，然后开始" << static_cast<int>(POST_CONE_CRUISE_DURATION_SECONDS) << "秒巡线延迟..." << endl;
                     parking_approach_detect_count = 0;
-                    post_cone_cruise_start_time = std::chrono::steady_clock::now(); // 启动锥桶引导后巡线延迟计时器
-                    need_post_cone_cruise_delay = true; // 设置延迟标志
+                    post_cone_straight_start_time = std::chrono::steady_clock::now(); // 启动锥桶引导后直走延迟计时器
+                    need_post_cone_straight_delay = true; // 设置直走延迟标志
+                    need_post_cone_cruise_delay = false; // 先不启动巡线延迟
                     from_cone_guidance = true; // 标记来自锥桶引导
                     setCarState(CarState::ParkingApproachDetection);
                 }
@@ -2181,6 +2191,21 @@ int main(int argc, char* argv[])
             case CarState::ParkingApproachDetection:
                 // 蓝框（蓝点）识别状态
                 Tracking(bin_image);
+
+                // 先检查是否在锥桶引导后的直走延迟时间内
+                if (need_post_cone_straight_delay) {
+                    auto elapsed_straight = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - post_cone_straight_start_time).count() / 1000000.0;
+                    if (elapsed_straight < POST_CONE_STRAIGHT_DURATION_SECONDS) {
+                        // 在直走延迟时间内，保持直走，不执行巡线和检测
+                        break; // 直接退出，不执行后续逻辑
+                    } else {
+                        // 直走延迟结束，启动巡线延迟
+                        cout << "[流程] " << static_cast<int>(POST_CONE_STRAIGHT_DURATION_SECONDS * 10) / 10.0f << "秒直走延迟结束，开始" << static_cast<int>(POST_CONE_CRUISE_DURATION_SECONDS) << "秒巡线延迟..." << endl;
+                        need_post_cone_straight_delay = false; // 清除直走延迟标志
+                        post_cone_cruise_start_time = std::chrono::steady_clock::now(); // 启动巡线延迟计时器
+                        need_post_cone_cruise_delay = true; // 设置巡线延迟标志
+                    }
+                }
 
                 // 检查是否在锥桶引导后的巡线延迟时间内
                 if (need_post_cone_cruise_delay) {

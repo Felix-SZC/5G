@@ -59,6 +59,7 @@ const float POST_AVOIDANCE_FAST_CRUISE_DURATION_SECONDS = 3.0f; // 避障后高�
 
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
 const float LANE_CHANGE_DURATION_SECONDS = 1.5f;    // 变道持续时间（秒）
+float POST_CONE_STRAIGHT_DURATION_SECONDS = 0.3f; // 锥桶引导后直走延迟时间（秒，可通过命令行参数配置）
 const float POST_CONE_CRUISE_LOW_DURATION_SECONDS = 2.0f;  // 锥桶引导后低速巡航时间
 const float POST_CONE_CRUISE_HIGH_DURATION_SECONDS = 3.0f; // 锥桶引导后高速巡航时间
 const int SERVO_PWM_LEFT_TURN = 780;                // 左转PWM值
@@ -262,6 +263,8 @@ bool has_seen_cones = false; // 是否已确认进入锥桶引导模式
 int cones_detect_count = 0; // 锥桶连续检测计数
 int cones_lost_count = 0; // 锥桶连续丢失计数
 int cone_target_x = -1; // 锥桶引导目标点X坐标（-1表示未检测到）
+bool need_post_cone_straight_delay = false; // 是否需要锥桶引导后直走延迟
+std::chrono::steady_clock::time_point post_cone_straight_start_time; // 直走延迟开始时间
 bool need_post_cone_cruise_delay = false; // 是否需要锥桶引导后巡线延迟
 bool from_cone_guidance = false; // 是否从锥桶引导来的（用于区分处理逻辑）
 std::vector<int> lane_widths; // 存储不同高度对应的赛道宽度
@@ -1698,7 +1701,14 @@ void motor_servo_contral()
             break;
 
         case CarState::PostConeCruise_Low:
-            servo_pwm_now = servo_pd(160);
+            // 状态：锥桶引导后的低速巡航
+            if (need_post_cone_straight_delay) {
+                // 直走延迟期间，舵机保持中值（直走）
+                servo_pwm_now = servo_pwm_mid;
+            } else {
+                // 直走延迟结束后，使用巡线控制
+                servo_pwm_now = servo_pd(160);
+            }
             gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE_SLOW);
             break;
             
@@ -2262,7 +2272,9 @@ int main(int argc, char* argv[])
                 }
                 
                 if (has_seen_cones && cones_lost_count >= CONE_EXIT_THRESHOLD) {
-                    cout << "[流程] 通过锥桶引导区域，进入锥桶引导后的低速巡航..." << endl;
+                    cout << "[流程] 通过锥桶引导区域，先直走" << static_cast<int>(POST_CONE_STRAIGHT_DURATION_SECONDS * 10) / 10.0f << "秒，然后进入低速巡航..." << endl;
+                    post_cone_straight_start_time = std::chrono::steady_clock::now(); // 启动锥桶引导后直走延迟计时器
+                    need_post_cone_straight_delay = true; // 设置直走延迟标志
                     setCarState(CarState::PostConeCruise_Low);
                     state_transition_time = std::chrono::steady_clock::now();
                 }
@@ -2271,6 +2283,22 @@ int main(int argc, char* argv[])
             case CarState::PostConeCruise_Low:
                 Tracking(bin_image);
                 {
+                    // 先检查是否在直走延迟时间内
+                    if (need_post_cone_straight_delay) {
+                        auto elapsed_straight = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - post_cone_straight_start_time).count() / 1000000.0;
+                        if (elapsed_straight < POST_CONE_STRAIGHT_DURATION_SECONDS) {
+                            // 在直走延迟时间内，保持直走，不执行巡线
+                            break; // 直接退出，不执行后续逻辑
+                        } else {
+                            // 直走延迟结束，重置标志并开始低速巡航计时
+                            cout << "[流程] " << static_cast<int>(POST_CONE_STRAIGHT_DURATION_SECONDS * 10) / 10.0f << "秒直走延迟结束，开始低速巡航..." << endl;
+                            need_post_cone_straight_delay = false; // 清除直走延迟标志
+                            state_transition_time = std::chrono::steady_clock::now(); // 重新启动低速巡航计时器
+                        }
+                    }
+                    
+                    // 检查低速巡航时间
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed_sec = std::chrono::duration_cast<std::chrono::microseconds>(now - state_transition_time).count() / 1000000.0;
                     if (elapsed_sec >= POST_CONE_CRUISE_LOW_DURATION_SECONDS) {
