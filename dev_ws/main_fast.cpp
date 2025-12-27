@@ -36,8 +36,8 @@ int number = 0; // 已处理帧计数
 bool SHOW_FPS = false; // 是否显示FPS信息，可通过命令行参数控制
 
 //------------速度参数配置------------------------------------------------------------------------------------------
-const int MOTOR_SPEED_DELTA_CRUISE_SLOW = 1200;      // 常规巡航速度增量（低速）
-const int MOTOR_SPEED_DELTA_CRUISE_FAST = 2000;      // 常规巡航速度增量（高速）
+const int MOTOR_SPEED_DELTA_CRUISE_SLOW = 1300;      // 常规巡航速度增量（低速）
+const int MOTOR_SPEED_DELTA_CRUISE_FAST = 2500;      // 常规巡航速度增量（高速）
 const int MOTOR_SPEED_DELTA_AVOID = 1100;            // 避障阶段速度增量
 const int MOTOR_SPEED_DELTA_POST_ZEBRA = 1300;       // 斑马线后巡线速度增量
 const int MOTOR_SPEED_DELTA_CONE_GUIDANCE = 1100;    // 锥桶引导阶段速度增量（有锥桶目标时）
@@ -46,6 +46,7 @@ const int MOTOR_SPEED_DELTA_PARKING_SEARCH = 1300;   // 寻找车库速度增量
 const int MOTOR_SPEED_DELTA_PARKING_FOLLOW = 1100;   // 车库跟随速度增量（已激活A/B识别时）
 const int MOTOR_SPEED_DELTA_PRE_PARKING = 1000;      // 预入库阶段速度增量
 const int MOTOR_SPEED_DELTA_BRAKE = -3000;           // 瞬时反转/刹停增量
+const int MOTOR_SPEED_DELTA_SLOW = 1000;           // 慢速行驶增量
 
 //------------时间参数配置（单位：秒）------------------------------------------------------------------------------------------
 const float BRIEF_STOP_REVERSE_DURATION = 0.5f; // 反转阶段持续时间（秒）
@@ -53,8 +54,8 @@ const float BRIEF_STOP_HOLD_DURATION = 0.1f;    // 刹停保持时间（秒）
 const float START_DELAY_SECONDS = 2.0f;              // 发车延时时间（秒）
 const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时间（秒）
 const float POST_ZEBRA_DELAY_SECONDS = 1.0f;        // 斑马线后巡线延迟时间（秒）
-const float FAST_CRUISE_DURATION_SECONDS = 5.0f;    // 避障前高速巡航持续时间（秒）
-const float POST_AVOIDANCE_FAST_CRUISE_DURATION_SECONDS = 3.0f; // 避障后高速巡航持续时间
+const float FAST_CRUISE_DURATION_SECONDS = 13.0f;    // 避障前高速巡航持续时间（秒）
+const float POST_AVOIDANCE_FAST_CRUISE_DURATION_SECONDS = 18.0f; // 避障后高速巡航持续时间
 
 
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
@@ -79,12 +80,14 @@ enum class CarState {
     Cruise_Low,     // 低速巡航（原Cruise）
     Avoidance,      // 避障
     Cruise_High_Post_Avoidance, // 避障后的高速巡航
+    Brake_After_Post_Avoidance_Cruise, // 避障后高速巡航后的刹车
     ZebraStop,      // 在斑马线处等待
     PostZebra,      // 斑马线后恢复
     LaneChange,     // 变道
     ConeGuidance,   // 引导锥桶区域
     PostConeCruise_Low,         // 锥桶引导后的低速巡航
     PostConeCruise_High,        // 锥桶引导后的高速巡航
+    Brake_After_Post_Cone_Cruise, // 锥桶引导后高速巡航后的刹车
     ParkingApproachDetection,  // 蓝框（蓝点）识别
     ParkingSearch,  // AB识别和计数
     BriefStopForABActivation,  // 激活AB识别前的停车
@@ -105,12 +108,14 @@ std::string carStateToString(CarState state) {
         case CarState::Cruise_Low:     return "Cruise_Low (低速巡航)";
         case CarState::Avoidance:      return "Avoidance (避障)";
         case CarState::Cruise_High_Post_Avoidance: return "Cruise_High_Post_Avoidance (避障后高速巡航)";
+        case CarState::Brake_After_Post_Avoidance_Cruise: return "Brake_After_Post_Avoidance_Cruise (避障后刹车)";
         case CarState::ZebraStop:      return "ZebraStop (在斑马线处等待)";
         case CarState::PostZebra:      return "PostZebra (斑马线后恢复)";
         case CarState::LaneChange:     return "LaneChange (变道)";
         case CarState::ConeGuidance:    return "ConeGuidance (引导锥桶区域)";
         case CarState::PostConeCruise_Low: return "PostConeCruise_Low (锥桶引导后的低速巡航)";
         case CarState::PostConeCruise_High: return "PostConeCruise_High (锥桶引导后的高速巡航)";
+        case CarState::Brake_After_Post_Cone_Cruise: return "Brake_After_Post_Cone_Cruise (锥桶引导后刹车)";
         case CarState::ParkingApproachDetection: return "ParkingApproachDetection (蓝框识别)";
         case CarState::ParkingSearch:  return "ParkingSearch (AB识别)";
         case CarState::BriefStopForABActivation: return "BriefStopForABActivation (激活AB识别前停车)";
@@ -223,8 +228,8 @@ int last_known_bz_heighest = 0;
 int count_bz = 0; // 避障计数器
 int bz_disappear_count = 0; // 障碍物连续消失计数
 const int BZ_DISAPPEAR_THRESHOLD = 3; // 确认障碍物消失的帧数阈值
-const int BZ_Y_UPPER_THRESHOLD = 200; // 可见障碍物底部阈值 (上限)
-const int BZ_Y_LOWER_THRESHOLD = 40; // 触发避障的Y轴下限阈值 (下限)
+const int BZ_Y_UPPER_THRESHOLD = 210; // 可见障碍物底部阈值 (上限)
+const int BZ_Y_LOWER_THRESHOLD = 80; // 触发避障的Y轴下限阈值 (下限)
 
 int bz_detect_count = 0; // 障碍物连续检测计数
 const int BZ_DETECT_THRESHOLD = 3; // 确认障碍物出现的帧数阈值
@@ -1358,8 +1363,8 @@ float servo_pd_bz(int target) { // 避障巡线控制
     int pidx = mid_bz[(int)(mid_bz.size() / 2)].x;
 
     // float kp = 1.5; // 比例系数
-    float kp = 2.0; // 比例系数
-    float kd = 4.0; // 微分系数
+    float kp = 1.0; // 比例系数
+    float kd = 3.5; // 微分系数
 
     error_first = target - pidx; // 计算误差
 
@@ -1723,14 +1728,16 @@ void motor_servo_contral()
             break;
 
         case CarState::Brake_After_High_Cruise:
+        case CarState::Brake_After_Post_Avoidance_Cruise:
+        case CarState::Brake_After_Post_Cone_Cruise:
             {
                 gpioPWM(servo_pin, servo_pwm_mid); // 刹车时舵机回中
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - state_transition_time).count() / 1000.0f;
                 if (elapsed < BRIEF_STOP_REVERSE_DURATION) {
-                    gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_BRAKE); // 瞬时反转
+                    gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_SLOW); // 瞬时反转
                 } else {
-                    gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock); // 刹停保持
+                    gpioPWM(motor_pin, MOTOR_SPEED_DELTA_SLOW); // 刹停保持
                 }
             }
             return; // 直接返回，不设置舵机
@@ -1753,7 +1760,9 @@ void motor_servo_contral()
             return;
     }
 
-    if (current_state != CarState::Brake_After_High_Cruise)
+    if (current_state != CarState::Brake_After_High_Cruise &&
+        current_state != CarState::Brake_After_Post_Avoidance_Cruise &&
+        current_state != CarState::Brake_After_Post_Cone_Cruise)
     {
         gpioPWM(servo_pin, servo_pwm_now);
     }
@@ -2120,8 +2129,22 @@ int main(int argc, char* argv[])
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed_sec = std::chrono::duration_cast<std::chrono::microseconds>(now - state_transition_time).count() / 1000000.0;
                     if (elapsed_sec >= POST_AVOIDANCE_FAST_CRUISE_DURATION_SECONDS) {
+                        setCarState(CarState::Brake_After_Post_Avoidance_Cruise);
+                        state_transition_time = std::chrono::steady_clock::now();
+                        std::cout << "[流程] 避障后高速巡航结束，开始刹车..." << std::endl;
+                    }
+                }
+                break;
+
+            case CarState::Brake_After_Post_Avoidance_Cruise:
+                // 刹车阶段不进行图像处理，仅等待时间
+                {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - state_transition_time).count() / 1000.0f;
+                    if (elapsed >= (BRIEF_STOP_REVERSE_DURATION + BRIEF_STOP_HOLD_DURATION)) {
                         setCarState(CarState::Cruise_Low);
-                        std::cout << "[流程] 避障后高速巡航结束，切换到低速巡航并开始寻找斑马线" << std::endl;
+                        std::cout << "[流程] 刹车完成，切换到低速巡航并开始寻找斑马线" << std::endl;
                     }
                 }
                 break;
@@ -2315,10 +2338,24 @@ int main(int argc, char* argv[])
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed_sec = std::chrono::duration_cast<std::chrono::microseconds>(now - state_transition_time).count() / 1000000.0;
                     if (elapsed_sec >= POST_CONE_CRUISE_HIGH_DURATION_SECONDS) {
+                        setCarState(CarState::Brake_After_Post_Cone_Cruise);
+                        state_transition_time = std::chrono::steady_clock::now();
+                        std::cout << "[流程] 锥桶引导后的高速巡航结束，开始刹车..." << std::endl;
+                    }
+                }
+                break;
+
+            case CarState::Brake_After_Post_Cone_Cruise:
+                // 刹车阶段不进行图像处理，仅等待时间
+                {
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - state_transition_time).count() / 1000.0f;
+                    if (elapsed >= (BRIEF_STOP_REVERSE_DURATION + BRIEF_STOP_HOLD_DURATION)) {
                         setCarState(CarState::ParkingApproachDetection);
                         parking_approach_detect_count = 0;
                         from_cone_guidance = true; 
-                        std::cout << "[流程] 锥桶引导后的高速巡航结束，开始蓝框识别" << std::endl;
+                        std::cout << "[流程] 刹车完成，开始蓝框识别" << std::endl;
                     }
                 }
                 break;
