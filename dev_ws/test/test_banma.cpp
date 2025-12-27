@@ -16,18 +16,18 @@ using namespace cv;
 //--------------- 斑马线检测参数 (优化后) ------------------------------------------
 // 斑马线检测ROI区域 (收紧以聚焦路面)
 const int BANMA_ROI_X = 10;           // ROI左上角X坐标
-const int BANMA_ROI_Y = 150;          // ROI左上角Y坐标 (下移)
+const int BANMA_ROI_Y = 130;          // ROI左上角Y坐标 (下移)
 const int BANMA_ROI_WIDTH = 300;      // ROI宽度
 const int BANMA_ROI_HEIGHT = 60;     // ROI高度 (减小)
 
 // 斑马线矩形筛选尺寸
-const int BANMA_RECT_MIN_WIDTH = 10;   // 矩形最小宽度 (调高以过滤噪点)
+const int BANMA_RECT_MIN_WIDTH = 15;   // 矩形最小宽度 (调高以过滤噪点)
 const int BANMA_RECT_MAX_WIDTH = 100;  // 矩形最大宽度
-const int BANMA_RECT_MIN_HEIGHT = 10;   // 矩形最小高度
+const int BANMA_RECT_MIN_HEIGHT = 15;   // 矩形最小高度
 const int BANMA_RECT_MAX_HEIGHT = 100;  // 矩形最大高度 (调低以排除车道线)
 
 // 判定为斑马线需要的最少白色矩形数量 (根据实际情况调整)
-const int BANMA_MIN_COUNT = 4;
+const int BANMA_MIN_COUNT = 5;
 
 int main(int argc, char** argv) {
     string imgPath;
@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
     // 5. 二值化
     cv::Mat binaryMask;
     // 顶帽变换后的图像，使用一个较低的固定阈值或OTSU效果都很好
-    cv::threshold(topHat, binaryMask, 40, 255, cv::THRESH_BINARY);
+    cv::threshold(topHat, binaryMask, 80, 255, cv::THRESH_BINARY);
     imshow("5. Thresholded Mask", binaryMask);
     cout << "按任意键继续..." << endl;
     waitKey(0);

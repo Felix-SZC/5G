@@ -24,7 +24,7 @@ std::chrono::steady_clock::time_point cruise_high_start_time;
 bool cruise_high_started = false;
 
 //------------速度参数配置------------------------------------------------------------------------------------------
-const int MOTOR_SPEED_DELTA_CRUISE_FAST = 2500;      // 常规巡航速度增量（高速）
+const int MOTOR_SPEED_DELTA_CRUISE_FAST = 2200;      // 常规巡航速度增量（高速）
 
 //------------时间参数配置（单位：秒）------------------------------------------------------------------------------------------
 const float START_DELAY_SECONDS = 2.0f;              // 发车延时时间（秒）

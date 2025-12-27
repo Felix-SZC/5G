@@ -37,7 +37,7 @@ bool SHOW_FPS = false; // 是否显示FPS信息，可通过命令行参数控制
 
 //------------速度参数配置------------------------------------------------------------------------------------------
 const int MOTOR_SPEED_DELTA_CRUISE_SLOW = 1300;      // 常规巡航速度增量（低速）
-const int MOTOR_SPEED_DELTA_CRUISE_FAST = 2500;      // 常规巡航速度增量（高速）
+const int MOTOR_SPEED_DELTA_CRUISE_FAST = 2200;      // 常规巡航速度增量（高速）
 const int MOTOR_SPEED_DELTA_AVOID = 1100;            // 避障阶段速度增量
 const int MOTOR_SPEED_DELTA_POST_ZEBRA = 1300;       // 斑马线后巡线速度增量
 const int MOTOR_SPEED_DELTA_CONE_GUIDANCE = 1100;    // 锥桶引导阶段速度增量（有锥桶目标时）
@@ -46,7 +46,7 @@ const int MOTOR_SPEED_DELTA_PARKING_SEARCH = 1300;   // 寻找车库速度增量
 const int MOTOR_SPEED_DELTA_PARKING_FOLLOW = 1100;   // 车库跟随速度增量（已激活A/B识别时）
 const int MOTOR_SPEED_DELTA_PRE_PARKING = 1000;      // 预入库阶段速度增量
 const int MOTOR_SPEED_DELTA_BRAKE = -3000;           // 瞬时反转/刹停增量
-const int MOTOR_SPEED_DELTA_SLOW = 1000;           // 慢速行驶增量
+const int MOTOR_SPEED_DELTA_SLOW = 1700;           // 高速到低速过度速度行驶增量
 
 //------------时间参数配置（单位：秒）------------------------------------------------------------------------------------------
 const float BRIEF_STOP_REVERSE_DURATION = 0.5f; // 反转阶段持续时间（秒）
@@ -54,15 +54,15 @@ const float BRIEF_STOP_HOLD_DURATION = 0.1f;    // 刹停保持时间（秒）
 const float START_DELAY_SECONDS = 2.0f;              // 发车延时时间（秒）
 const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时间（秒）
 const float POST_ZEBRA_DELAY_SECONDS = 1.0f;        // 斑马线后巡线延迟时间（秒）
-const float FAST_CRUISE_DURATION_SECONDS = 13.0f;    // 避障前高速巡航持续时间（秒）
-const float POST_AVOIDANCE_FAST_CRUISE_DURATION_SECONDS = 18.0f; // 避障后高速巡航持续时间
+const float FAST_CRUISE_DURATION_SECONDS = 20.0f;    // 避障前高速巡航持续时间（秒）
+const float POST_AVOIDANCE_FAST_CRUISE_DURATION_SECONDS = 10.5f; // 避障后高速巡航持续时间
 
 
 const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
 const float LANE_CHANGE_DURATION_SECONDS = 1.5f;    // 变道持续时间（秒）
-float POST_CONE_STRAIGHT_DURATION_SECONDS = 0.3f; // 锥桶引导后直走延迟时间（秒，可通过命令行参数配置）
-const float POST_CONE_CRUISE_LOW_DURATION_SECONDS = 2.0f;  // 锥桶引导后低速巡航时间
-const float POST_CONE_CRUISE_HIGH_DURATION_SECONDS = 3.0f; // 锥桶引导后高速巡航时间
+float POST_CONE_STRAIGHT_DURATION_SECONDS = 0.0f; // 锥桶引导后直走延迟时间（秒，可通过命令行参数配置）
+const float POST_CONE_CRUISE_LOW_DURATION_SECONDS = 1.0f;  // 锥桶引导后低速巡航时间
+const float POST_CONE_CRUISE_HIGH_DURATION_SECONDS = 1.5f; // 锥桶引导后高速巡航时间
 const int SERVO_PWM_LEFT_TURN = 780;                // 左转PWM值
 const int SERVO_PWM_RIGHT_TURN = 690;               // 右转PWM值
 const int MOTOR_SPEED_DELTA_LANE_CHANGE = 1300;     // 变道速度增量
@@ -249,7 +249,7 @@ const int BANMA_RECT_MIN_HEIGHT = 15;   // 矩形最小高度
 const int BANMA_RECT_MAX_HEIGHT = 100;  // 矩形最大高度 (调低以排除车道线)
 
 
-const int BANMA_MIN_COUNT = 4;  // 判定为斑马线需要的最少白色矩形数量 
+const int BANMA_MIN_COUNT = 5;  // 判定为斑马线需要的最少白色矩形数量 
 
 //----------------变道相关---------------------------------------------------
 int flag_turn_done = 0; // 转向完成标志
@@ -1730,17 +1730,10 @@ void motor_servo_contral()
         case CarState::Brake_After_High_Cruise:
         case CarState::Brake_After_Post_Avoidance_Cruise:
         case CarState::Brake_After_Post_Cone_Cruise:
-            {
-                gpioPWM(servo_pin, servo_pwm_mid); // 刹车时舵机回中
-                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - state_transition_time).count() / 1000.0f;
-                if (elapsed < BRIEF_STOP_REVERSE_DURATION) {
-                    gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_SLOW); // 瞬时反转
-                } else {
-                    gpioPWM(motor_pin, MOTOR_SPEED_DELTA_SLOW); // 刹停保持
-                }
-            }
-            return; // 直接返回，不设置舵机
+            // 慢速过渡阶段：继续巡线，使用慢速行驶
+            servo_pwm_now = servo_pd(160); // 计算巡线舵量
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_SLOW); // 慢速行驶
+            break;
 
         case CarState::Cruise_Low:
             servo_pwm_now = servo_pd(160);
@@ -1760,12 +1753,7 @@ void motor_servo_contral()
             return;
     }
 
-    if (current_state != CarState::Brake_After_High_Cruise &&
-        current_state != CarState::Brake_After_Post_Avoidance_Cruise &&
-        current_state != CarState::Brake_After_Post_Cone_Cruise)
-    {
-        gpioPWM(servo_pin, servo_pwm_now);
-    }
+    gpioPWM(servo_pin, servo_pwm_now);
 }
 
 //-----------------------------------------------------------------------------------主函数-----------------------------------------------

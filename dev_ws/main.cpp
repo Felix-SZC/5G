@@ -1340,8 +1340,8 @@ float servo_pd_bz(int target) { // 避障巡线控制
     int pidx = mid_bz[(int)(mid_bz.size() / 2)].x;
 
     // float kp = 1.5; // 比例系数
-    float kp = 2.0; // 比例系数
-    float kd = 4.0; // 微分系数
+    float kp = 1.0; // 比例系数
+    float kd = 3.5; // 微分系数
 
     error_first = target - pidx; // 计算误差
 
